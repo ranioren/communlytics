@@ -1,0 +1,40 @@
+{
+    "id": "C09U2C6R541",
+    "created": 1763472560,
+    "creator": "U03Q8T6PF",
+    "is_org_shared": false,
+    "is_im": false,
+    "context_team_id": "T03Q8T6P7",
+    "updated": 1763472560449,
+    "name": "test",
+    "name_normalized": "test",
+    "is_channel": true,
+    "is_group": false,
+    "is_mpim": false,
+    "is_private": false,
+    "is_archived": false,
+    "is_general": false,
+    "is_shared": false,
+    "is_ext_shared": false,
+    "unlinked": 0,
+    "is_pending_ext_shared": false,
+    "pending_shared": [],
+    "parent_conversation": null,
+    "purpose": {
+        "value": "",
+        "creator": "",
+        "last_set": 0
+    },
+    "topic": {
+        "value": "",
+        "creator": "",
+        "last_set": 0
+    },
+    "shared_team_ids": [
+        "T03Q8T6P7"
+    ],
+    "pending_connected_team_ids": [],
+    "is_member": true,
+    "last_read": "1763472560.597009",
+    "previous_names": []
+}

@@ -1,0 +1,117 @@
+[
+    {
+        "user": "U09TMHS70NA",
+        "type": "message",
+        "ts": "1763545615.637719",
+        "bot_id": "B09TH7JGMGB",
+        "app_id": "A09TLCJVDDL",
+        "text": "First message",
+        "team": "T03Q8T6P7",
+        "bot_profile": {
+            "id": "B09TH7JGMGB",
+            "deleted": false,
+            "name": "community_manager",
+            "updated": 1763473661,
+            "app_id": "A09TLCJVDDL",
+            "user_id": "U09TMHS70NA",
+            "icons": {
+                "image_36": "https://a.slack-edge.com/80588/img/plugins/app/bot_36.png",
+                "image_48": "https://a.slack-edge.com/80588/img/plugins/app/bot_48.png",
+                "image_72": "https://a.slack-edge.com/80588/img/plugins/app/service_72.png"
+            },
+            "team_id": "T03Q8T6P7"
+        },
+        "blocks": [
+            {
+                "type": "rich_text",
+                "block_id": "=Y5z7",
+                "elements": [
+                    {
+                        "type": "rich_text_section",
+                        "elements": [
+                            {
+                                "type": "text",
+                                "text": "First message"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+        "user_info": {
+            "id": "U09TMHS70NA",
+            "name": "Unknown User",
+            "is_bot": false
+        }
+    },
+    {
+        "user": "U09TMHS70NA",
+        "type": "message",
+        "ts": "1763545592.769759",
+        "bot_id": "B09TH7JGMGB",
+        "app_id": "A09TLCJVDDL",
+        "text": "First message",
+        "team": "T03Q8T6P7",
+        "bot_profile": {
+            "id": "B09TH7JGMGB",
+            "app_id": "A09TLCJVDDL",
+            "user_id": "U09TMHS70NA",
+            "name": "community_manager",
+            "icons": {
+                "image_36": "https://a.slack-edge.com/80588/img/plugins/app/bot_36.png",
+                "image_48": "https://a.slack-edge.com/80588/img/plugins/app/bot_48.png",
+                "image_72": "https://a.slack-edge.com/80588/img/plugins/app/service_72.png"
+            },
+            "deleted": false,
+            "updated": 1763473661,
+            "team_id": "T03Q8T6P7"
+        },
+        "blocks": [
+            {
+                "type": "rich_text",
+                "block_id": "/5Sz",
+                "elements": [
+                    {
+                        "type": "rich_text_section",
+                        "elements": [
+                            {
+                                "type": "text",
+                                "text": "First message"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+        "user_info": {
+            "id": "U09TMHS70NA",
+            "name": "Unknown User",
+            "is_bot": false
+        }
+    },
+    {
+        "subtype": "channel_join",
+        "user": "U09TMHS70NA",
+        "text": "<@U09TMHS70NA> has joined the channel",
+        "inviter": "U03Q8T6PF",
+        "type": "message",
+        "ts": "1763545056.347449",
+        "user_info": {
+            "id": "U09TMHS70NA",
+            "name": "Unknown User",
+            "is_bot": false
+        }
+    },
+    {
+        "subtype": "channel_join",
+        "user": "U03Q8T6PF",
+        "text": "<@U03Q8T6PF> has joined the channel",
+        "type": "message",
+        "ts": "1763472560.597009",
+        "user_info": {
+            "id": "U03Q8T6PF",
+            "name": "Unknown User",
+            "is_bot": false
+        }
+    }
+]
