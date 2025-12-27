@@ -12,7 +12,7 @@ from slack_utils import send_private_reply, send_channel_reply
 
 # --- Configuration & Setup ---
 st.set_page_config(page_title="Slack Engagement Dashboard", layout="wide")
-DATA_PATH = os.path.join("channel extraction", "slack_spencer_hf.csv")
+DATA_PATH = os.path.join("channel extraction", "merged_data.csv")
 
 # --- Main App ---
 def main():
@@ -40,23 +40,41 @@ def main():
         return
 
     # Sidebar Navigation
-    # Use session state to control the radio button
+    st.sidebar.title("Navigation")
     dashboard_mode = st.sidebar.radio(
         "Select Dashboard", 
         ["Overall Summary", "User Analysis", "Tasks", "Bulk Messaging"],
         key="selected_dashboard"
     )
 
+    st.sidebar.divider()
+    st.sidebar.subheader("Global Filters")
+    
+    # Workspace Filter
+    all_workspaces = sorted(df['workspace'].unique())
+    selected_workspaces = st.sidebar.multiselect(
+        "Slack Workspaces or Reddit", 
+        all_workspaces, 
+        default=all_workspaces
+    )
+
+    if not selected_workspaces:
+        st.warning("Please select at least one workspace.")
+        return
+
+    # Filter DF by selected workspaces for all subsequent logic
+    df_ws = df[df['workspace'].isin(selected_workspaces)]
+
     # --- Dashboard 1: Overall Summary ---
     if dashboard_mode == "Overall Summary":
         st.header("Overall Channel Activity")
         
-        all_channels = sorted(df['channel'].unique())
+        all_channels = sorted(df_ws['channel'].unique())
         selected_channels = st.sidebar.multiselect("Filter by Channel", all_channels, default=all_channels)
         
         # Date Filter
-        min_date = df['date'].min()
-        max_date = df['date'].max()
+        min_date = df_ws['date'].min()
+        max_date = df_ws['date'].max()
         
         # Default to last 30 days, constrained by data range
         default_end = max_date
@@ -80,10 +98,10 @@ def main():
             
         start_date, end_date = date_range
 
-        filtered_df = df[
-            (df['channel'].isin(selected_channels)) & 
-            (df['date'] >= start_date) & 
-            (df['date'] <= end_date)
+        filtered_df = df_ws[
+            (df_ws['channel'].isin(selected_channels)) & 
+            (df_ws['date'] >= start_date) & 
+            (df_ws['date'] <= end_date)
         ]
         
         col1, col2, col3 = st.columns(3)
@@ -102,11 +120,17 @@ def main():
         fig_line = px.area(daily_activity, x='date', y='Count', color='Message Type', title="Daily Message Volume by Type")
         st.plotly_chart(fig_line, use_container_width=True)
 
-        st.subheader("Top 10 Contributors (in selected filter)")
+        st.subheader("Top 10 Slack Contributors (pythondev)")
         
         if not filtered_df.empty:
+            # Filter specifically for pythondev to show Slack contributors
+            slack_only_df = filtered_df[filtered_df['workspace'] == 'pythondev']
+            
             # 1. Identify Top 10 Users by Message Count
-            top_users = filtered_df['user'].value_counts().head(10).index.tolist()
+            top_users = slack_only_df['user'].value_counts().head(10).index.tolist()
+            
+            if not top_users:
+                st.info("No Slack contributors found in this date range. Try expanding the Date Range in the sidebar to include 2017.")
             
             table_data = []
             emojis = {1: "😠", 2: "🙁", 3: "😐", 4: "🙂", 5: "😃"}
@@ -171,14 +195,14 @@ def main():
         if selected_user != st.session_state.get('selected_user_analysis'):
              st.session_state['selected_user_analysis'] = selected_user
         
-        user_channels = df[df['user'] == selected_user]['channel'].unique()
+        user_channels = df_ws[df_ws['user'] == selected_user]['channel'].unique()
         selected_channels_user = st.sidebar.multiselect("Filter by Channel", user_channels, default=user_channels)
         
         if not selected_channels_user:
              st.warning("Please select at least one channel.")
              return
 
-        user_df = df[(df['user'] == selected_user) & (df['channel'].isin(selected_channels_user))]
+        user_df = df_ws[(df_ws['user'] == selected_user) & (df_ws['channel'].isin(selected_channels_user))]
         
         col1, col2 = st.columns(2)
         col1.metric("Total Messages", len(user_df))
@@ -243,16 +267,16 @@ def main():
         st.info("This dashboard lists all questions that have not received a direct response (mentioning the asker) within 24 hours.")
         
         # Filter: Channel
-        all_channels = sorted(df['channel'].unique())
+        all_channels = sorted(df_ws['channel'].unique())
         selected_channels_tasks = st.sidebar.multiselect("Filter by Channel", all_channels, default=all_channels)
         
         if not selected_channels_tasks:
             st.warning("Please select at least one channel.")
             return
             
-        filtered_tasks = df[
-            (df['channel'].isin(selected_channels_tasks)) & 
-            (df['is_unanswered'])
+        filtered_tasks = df_ws[
+            (df_ws['channel'].isin(selected_channels_tasks)) & 
+            (df_ws['is_unanswered'])
         ]
         
         st.metric("Total Unanswered Questions", len(filtered_tasks))
@@ -353,8 +377,8 @@ def main():
         
         # 3. Target Selection
         # Calculate personas for all users to populate counts (optional but nice)
-        with st.spinner("Analyzing user base..."):
-            all_user_personas = calculate_all_user_personas(df)
+        with st.spinner("Analyzing user base (filtered by workspace)..."):
+            all_user_personas = calculate_all_user_personas(df_ws)
             
         # Create a DF for easy filtering
         persona_df = pd.DataFrame(list(all_user_personas.items()), columns=['User', 'Persona'])

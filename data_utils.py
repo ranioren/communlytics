@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import json
 from textblob import TextBlob
 from datetime import timedelta
 import streamlit as st
@@ -15,9 +16,25 @@ def load_data(path):
     df = pd.read_csv(path)
     
     # Preprocessing
-    df['ts'] = pd.to_datetime(df['ts'], errors='coerce')
+    if 'timestamp' in df.columns:
+        df['ts'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    else:
+        df['ts'] = pd.to_datetime(df['ts'], errors='coerce')
+        
+    # Filter rows with invalid timestamps
+    df = df.dropna(subset=['ts'])
     df['date'] = df['ts'].dt.date
-    df['sentences'] = df['sentences'].astype(str)
+    
+    # Handle user column for Reddit (which might be NaN)
+    if 'user' in df.columns:
+        df['user'] = df['user'].fillna("Anonymous")
+    else:
+        df['user'] = "Anonymous"
+
+    if 'sentences' in df.columns:
+        df['sentences'] = df['sentences'].astype(str)
+    elif 'sentence' in df.columns:
+        df['sentences'] = df['sentence'].astype(str)
 
     # Categorization Logic
     def categorize_message(text):
@@ -151,3 +168,77 @@ def calculate_all_user_personas(df):
         user_personas[user] = persona
         
     return user_personas
+
+def transform_reddit_to_csv(jsonl_path, csv_path):
+    """
+    Transforms Reddit JSONL data to CSV format with specific column mapping.
+    Maps: 'sub' -> 'channel', 'title' -> 'sentence', 'selftext' -> 'comments', 'created_utc' -> 'created_utc'
+    Adds: 'workspace' = 'reddit'
+    """
+    data = []
+    with open(jsonl_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
+                data.append(json.loads(line))
+    
+    df = pd.DataFrame(data)
+    
+    # Column Mapping
+    rename_map = {
+        "sub": "channel",
+        "title": "sentence",
+        "selftext": "comments",
+        "created_utc": "created_utc"
+    }
+    df = df.rename(columns=rename_map)
+    
+    # Add static workspace
+    df['workspace'] = 'reddit'
+    
+    # Keep only relevant columns
+    cols_to_keep = ["workspace", "channel", "sentence", "comments", "created_utc"]
+    available_cols = [c for c in cols_to_keep if c in df.columns]
+    
+    df_out = df[available_cols]
+    df_out.to_csv(csv_path, index=False)
+    return df_out
+
+def merge_slack_reddit(slack_csv_path, reddit_csv_path, output_csv_path):
+    """
+    Merges Slack and Reddit CSVs into a single standardized CSV.
+    Standardizes:
+    - timestamp: From Slack 'ts' and Reddit 'created_utc'
+    - sentences: From Slack 'sentences' and Reddit 'sentence'
+    - Includes 'user' (Slack) and 'comments' (Reddit) separately.
+    """
+    # Load Slack
+    df_slack = pd.read_csv(slack_csv_path)
+    # Slack ts is often ISO string in this dataset, but we will handle both
+    df_slack['timestamp'] = pd.to_datetime(df_slack['ts'], errors='coerce')
+    
+    # Load Reddit
+    df_reddit = pd.read_csv(reddit_csv_path)
+    # Reddit created_utc is unix timestamp
+    df_reddit['timestamp'] = pd.to_datetime(df_reddit['created_utc'], unit='s', errors='coerce')
+    # Rename sentence to sentences to match Slack
+    df_reddit = df_reddit.rename(columns={"sentence": "sentences"})
+    
+    # Define shared columns
+    shared_cols = ["timestamp", "workspace", "channel", "sentences", "user", "comments"]
+    
+    # Ensure all columns exist in both (add missing as NaN)
+    for col in shared_cols:
+        if col not in df_slack.columns:
+            df_slack[col] = pd.NA
+        if col not in df_reddit.columns:
+            df_reddit[col] = pd.NA
+            
+    # Concatenate
+    df_merged = pd.concat([df_slack[shared_cols], df_reddit[shared_cols]], ignore_index=True)
+    
+    # Sort by timestamp
+    df_merged = df_merged.sort_values(by="timestamp")
+    
+    # Save
+    df_merged.to_csv(output_csv_path, index=False)
+    return df_merged
