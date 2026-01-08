@@ -4,3 +4,4 @@ plotly
 textblob
 python-dotenv
 requests
+google-generativeai
