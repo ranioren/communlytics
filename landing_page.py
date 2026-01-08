@@ -61,17 +61,17 @@ html, body, [class*="st-"] {
 }
 h1, h2, h3 { color: #1E1E1E; }
 .hero-text {
-    font-size: 3.5rem;
-    font-weight: 700;
+    font-size: 5rem;
+    font-weight: 800;
     line-height: 1.1;
-    margin-bottom: 1.5rem;
+    margin-bottom: 2rem;
     text-align: center;
 }
 .hero-subtext {
-    font-size: 1.4rem;
+    font-size: 1.8rem;
     color: #4A4A4A;
     text-align: center;
-    margin-bottom: 3rem;
+    margin-bottom: 3.5rem;
     max-width: 800px;
     margin-left: auto;
     margin-right: auto;
@@ -419,7 +419,7 @@ with col_cta_right:
     st.markdown("""
         <div style="height: 700px; display: flex; flex-direction: column; justify-content: center; align-items: center; border: 1px solid #EAEAEA; border-radius: 12px; background: #F9F9F9;">
             <p style="font-size: 1.2rem; color: #4A4A4A; margin-bottom: 2rem;">Access your dashboard and insights.</p>
-            <a href="http://localhost:8501" target="_blank" class="blue-btn">Go to application</a>
+            <a href="http://localhost:8506" target="_blank" class="blue-btn">Go to application</a>
         </div>
     """, unsafe_allow_html=True)
 
