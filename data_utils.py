@@ -7,7 +7,7 @@ import streamlit as st
 
 # --- Helper Functions ---
 @st.cache_data
-def load_data(path):
+def load_data(path, last_modified=None):
     if not os.path.exists(path):
         st.error(f"Data file not found at: {path}")
         return pd.DataFrame()
@@ -17,9 +17,9 @@ def load_data(path):
     
     # Preprocessing
     if 'timestamp' in df.columns:
-        df['ts'] = pd.to_datetime(df['timestamp'], errors='coerce')
+        df['ts'] = pd.to_datetime(df['timestamp'], errors='coerce', format='mixed')
     else:
-        df['ts'] = pd.to_datetime(df['ts'], errors='coerce')
+        df['ts'] = pd.to_datetime(df['ts'], errors='coerce', format='mixed')
         
     # Filter rows with invalid timestamps
     df = df.dropna(subset=['ts'])
@@ -60,14 +60,19 @@ def load_data(path):
     df['Sentiment Score'] = df['sentences'].apply(get_sentiment_score)
     
     # --- Unanswered Question Logic ---
+    # Skip this logic for Reddit data (no user information)
     df['is_question'] = df['sentences'].str.contains(r'\?', regex=True)
     df['is_unanswered'] = False
     
     # Sort by time to ensure order
     df = df.sort_values(by=['channel', 'ts'])
     
-    # We will iterate channel by channel
+    # We will iterate channel by channel, but skip Reddit workspace
     for channel_name, channel_data in df.groupby('channel'):
+        # Skip Reddit channels (no user data to match)
+        if channel_data['workspace'].iloc[0] == 'reddit':
+            continue
+            
         # Get potential responses: messages with '@'
         responses = channel_data[channel_data['sentences'].str.contains('@')]
         
@@ -85,6 +90,10 @@ def load_data(path):
             ]
             
             user_name = question['user']
+            
+            # Skip if user is Anonymous (Reddit data)
+            if user_name == "Anonymous":
+                continue
             
             # Check if any valid response contains the user name
             is_answered = valid_responses['sentences'].str.contains(user_name, case=False).any()
