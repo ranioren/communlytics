@@ -1,5 +1,6 @@
 import os
 import requests
+import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,6 +15,7 @@ def get_auth_params():
         'token': TOKEN
     }
 
+@st.cache_data(ttl=3600)
 def get_board_id(board_name_preference=["Communlytics", "Personal", "To Do"]):
     """
     Finds a board ID. Tries names in preference order. 
@@ -42,6 +44,7 @@ def get_board_id(board_name_preference=["Communlytics", "Personal", "To Do"]):
              
     return None, "No open boards available."
 
+@st.cache_data(ttl=3600)
 def get_list_id(board_id, list_name="today"):
     """
     Finds a list ID on the given board. 

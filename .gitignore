@@ -36,3 +36,7 @@ ENV/
 
 # Logs
 *.log
+
+# Office Lock Files
+.~lock.*
+

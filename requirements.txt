@@ -5,3 +5,13 @@ textblob
 python-dotenv
 requests
 google-generativeai
+wordcloud
+matplotlib
+transformers
+torch
+streamlit-option-menu
+mcp
+nest_asyncio
+psycopg2-binary
+sqlalchemy
+pgvector

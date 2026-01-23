@@ -6,10 +6,13 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
 load_dotenv()
-from data_utils import load_data, get_user_persona, calculate_all_user_personas
-from ai_utils import get_top_suggestions, generate_ai_response
+from data_utils import load_data, get_user_persona, calculate_all_user_personas, generate_wordcloud, load_crm_data, check_is_client, enrich_user_data
+from ai_utils import get_top_suggestions, generate_ai_response, generate_crm_response
 from trello_utils import add_trello_task
 from slack_utils import send_private_reply, send_channel_reply
+from streamlit_option_menu import option_menu
+# import hubspot_utils (Removed)
+from data_utils import load_crm_data
 
 # --- Configuration & Setup ---
 st.set_page_config(page_title="Slack Engagement Dashboard", layout="wide")
@@ -23,13 +26,228 @@ def main():
         st.session_state['selected_dashboard'] = "User Analysis"
         st.session_state['selected_user_analysis'] = user_name
 
+    # --- reusable component ---
+    def render_task_card(index, row):
+        """
+        Renders a single task card with AI, Trello, and CRM integration.
+        """
+        user_msg = row['sentences']
+        ts = row['ts']
+        user = row['user']
+        channel = row['channel']
+        
+        # Truncate for title
+        preview = (user_msg[:75] + '..') if len(user_msg) > 75 else user_msg
+        
+        with st.expander(f"**{user}** in **#{channel}**: {preview}"):
+            st.write(f"**Full Question** (asked at {ts}):")
+            st.info(user_msg)
+            
+            # Lazy load key
+            kb_lookup_key = f"kb_lookup_{index}"
+            
+            if kb_lookup_key not in st.session_state:
+                    st.session_state[kb_lookup_key] = False
+            
+            if not st.session_state[kb_lookup_key]:
+                    if st.button("🔍 Find Similar Questions", key=f"btn_kb_{index}"):
+                        st.session_state[kb_lookup_key] = True
+                        st.rerun()
+            
+            if st.session_state[kb_lookup_key]:
+                st.markdown("##### 📚 Knowledgebase Suggestions")
+                with st.spinner("Finding similar questions..."):
+                    suggestions = get_top_suggestions(user_msg)
+                
+                if not suggestions:
+                    st.write("No similar questions found in knowledge base.")
+                else:
+                    st.write("Select relevant suggestions to include in AI drafting:")
+                    selected_indices = []
+                    for i, s in enumerate(suggestions):
+                        if st.checkbox(f"**{s['similarity']:.1%} Match**: {s['question'][:100]}...", key=f"kb_{index}_{i}"):
+                            selected_indices.append(i)
+                        with st.container():
+                            st.caption(f"**Answer**: {s['answer'][:200]}...")
+                    
+                    if st.button("✨ Generate Draft with Gemini", key=f"gen_{index}"):
+                        if not selected_indices:
+                            st.warning("Please select at least one suggestion.")
+                        else:
+                            chosen = [suggestions[i] for i in selected_indices]
+                            # Get current draft if user already typed something
+                            current_draft_content = st.session_state.get(f"resp_{index}", "")
+                            with st.spinner("Gemini is drafting a response..."):
+                                draft = generate_ai_response(user_msg, chosen, existing_draft=current_draft_content)
+                                st.session_state['ai_drafts'][index] = draft
+                                # Directly update the text area's session state key
+                                st.session_state[f"resp_{index}"] = draft
+                                st.rerun()
+
+            # Work Area
+            # Use session state to handle the text area value
+            if f"resp_{index}" not in st.session_state:
+                 st.session_state[f"resp_{index}"] = st.session_state['ai_drafts'].get(index, "")
+            
+            respond_text = st.text_area("Draft Response / Notes:", key=f"resp_{index}")
+            
+            # Sync back to our persistent draft storage
+            st.session_state['ai_drafts'][index] = respond_text
+            
+            # Action Buttons
+            col_a, col_b, col_c, col_d, col_e = st.columns(5)
+            
+            if col_a.button("✉️ Private Reply", key=f"priv_{index}"):
+                with st.spinner("Sending private message..."):
+                    success, msg = send_private_reply("rano", user, respond_text, simulate_typing=True)
+                    if success:
+                        st.toast(msg, icon="✅")
+                    else:
+                        st.error(msg)
+                
+            if col_b.button("📢 Channel Reply", key=f"chan_{index}"):
+                with st.spinner("Posting to #test..."):
+                    success, msg = send_channel_reply("#test", respond_text)
+                    if success:
+                        st.toast(msg, icon="✅")
+                    else:
+                        st.error(msg)
+                
+            if col_c.button("📋 Trello Task", key=f"trello_{index}"):
+                with st.spinner("Creating Trello card..."):
+                    success, msg = add_trello_task(user, user_msg, respond_text)
+                    if success:
+                        st.toast(msg, icon="✅")
+                    else:
+                        st.error(msg)
+                
+            if col_d.button("💬 Interact with CRM", key=f"sf_{index}"):
+                 if f"show_crm_{index}" not in st.session_state:
+                     st.session_state[f"show_crm_{index}"] = True
+                 else:
+                     st.session_state[f"show_crm_{index}"] = not st.session_state[f"show_crm_{index}"]
+            
+            # CRM Lookup Area
+            if st.session_state.get(f"show_crm_{index}", False):
+                 st.markdown("---")
+                 
+                 with st.spinner("Fetching CRM data..."):
+                      # Load Data
+                      sheet_url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSiHHBbo2j1VVn06Xub2FqBdGqiVEzmNzOcaQcGu10W53Ai93HIYyr3UHb4RKKQpqrF3Iso6z5HhfiI/pub?output=csv"
+                      crm_df = load_crm_data(sheet_url)
+                      
+                      if crm_df.empty:
+                          st.error("Could not load CRM data.")
+                      else:
+                          # Simple filter: Check if any part of the name matches
+                          match = None
+                          
+                          # 1. Try exact Full Name match
+                          exact_matches = crm_df[crm_df['Full Name'].str.lower() == user.lower()]
+                          if not exact_matches.empty:
+                              match = exact_matches.iloc[0]
+                          
+                          # 2. Try First Name match if no exact match
+                          if match is None:
+                              # Split slack user by space
+                              first_name_guess = user.split()[0]
+                              partial_matches = crm_df[crm_df['First Name'].str.lower() == first_name_guess.lower()]
+                              if not partial_matches.empty:
+                                  match = partial_matches.iloc[0]
+                          
+                          if match is not None:
+                              c1, c2 = st.columns(2)
+                              
+                              # Left Column: Details
+                              with c1:
+                                  st.caption("🔎 **Mock CRM Data**")
+                                  st.success(f"**Found: {match['Full Name']}**")
+                                  
+                                  # Where is he from
+                                  loc_str = "Unknown"
+                                  if 'City' in match and pd.notna(match['City']):
+                                       loc_str = match['City']
+                                  if 'State' in match and pd.notna(match['State']):
+                                       loc_str += f", {match['State']}"
+                                  st.markdown(f"🌍 **From:** {loc_str}")
+                                  
+                                  # Where does he work
+                                  company = match['Company'] if 'Company' in match and pd.notna(match['Company']) else "Unknown"
+                                  st.markdown(f"🏢 **Work:** {company}")
+                                  
+                                  # Other details
+                                  if 'Role' in match and pd.notna(match['Role']): 
+                                      st.markdown(f"💼 **Role:** {match['Role']}")
+                                  if 'Email' in match and pd.notna(match['Email']): 
+                                      st.markdown(f"📧 **Email:** {match['Email']}")
+                                  if 'notes' in match and pd.notna(match['notes']): 
+                                      st.info(f"📝 **Notes:** {match['notes']}")
+                                  
+                              # Right Column: Chat
+                              with c2:
+                                  st.caption("Chat with Account manager - via CRM")
+                                  
+                                  # Chat History Key
+                                  crm_chat_key = f"crm_chat_{index}_{match['First Name']}"
+                                  if crm_chat_key not in st.session_state:
+                                      st.session_state[crm_chat_key] = []
+                                      
+                                  # Display History
+                                  chat_container = st.container(height=200)
+                                   
+                                  # Dark Green Robot Icon
+                                  GREEN_BOT_ICON = "https://img.icons8.com/ios-filled/50/006400/bot.png"
+                                   
+                                  with chat_container:
+                                      for msg in st.session_state[crm_chat_key]:
+                                          avatar = GREEN_BOT_ICON if msg["role"] == "assistant" else None
+                                          with st.chat_message(msg["role"], avatar=avatar):
+                                              st.write(msg["content"])
+                                               
+                                  # Input
+                                  if users_query := st.chat_input(f"Ask about {match['First Name']}...", key=f"crm_in_{index}"):
+                                       # Add user message
+                                       st.session_state[crm_chat_key].append({"role": "user", "content": users_query})
+                                       with chat_container:
+                                           with st.chat_message("user"):
+                                               st.write(users_query)
+                                               
+                                           with st.chat_message("assistant", avatar=GREEN_BOT_ICON):
+                                               with st.spinner("Analyzing CRM data..."):
+                                                   # Prepare context
+                                                   context_str = str(match.to_dict())
+                                                   ans = generate_crm_response(users_query, context_str)
+                                                   st.write(ans)
+                                                   st.session_state[crm_chat_key].append({"role": "assistant", "content": ans})
+                                                   
+                          else:
+                              st.caption("🔎 **Mock CRM Data**")
+                              st.warning(f"User '{user}' not found in CRM Sheet.")
+                              st.caption(f"Checked against {len(crm_df)} records.")
+            
+            if col_e.button("✅ Resolve", key=f"res_{index}"):
+                 st.session_state['resolved_tasks'].add(index)
+                 st.toast("Task marked as resolved!", icon="🎉")
+                 st.rerun()
+
+
     st.title("Community Engagement Analysis")
     
     # Initialize Session State
     if 'selected_user_analysis' not in st.session_state:
         st.session_state['selected_user_analysis'] = None
     if 'selected_dashboard' not in st.session_state:
-        st.session_state['selected_dashboard'] = "Community Health"
+        # Check query params for deep linking
+        qp = st.query_params
+        if "dashboard" in qp:
+            target = qp["dashboard"]
+            # Validate target is a valid option
+            if target in ["Community Health", "User Analysis", "Tasks", "Bulk Messaging"]:
+                 st.session_state['selected_dashboard'] = target
+            else:
+                 st.session_state['selected_dashboard'] = "Community Health"
+        else:
+            st.session_state['selected_dashboard'] = "Community Health"
     if 'resolved_tasks' not in st.session_state:
         st.session_state['resolved_tasks'] = set()
     if 'ai_drafts' not in st.session_state:
@@ -48,15 +266,39 @@ def main():
         st.warning("No data loaded.")
         return
 
+    # --- Pre-calculate User Data ---
+    # Load CRM Data
+    sheet_url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSiHHBbo2j1VVn06Xub2FqBdGqiVEzmNzOcaQcGu10W53Ai93HIYyr3UHb4RKKQpqrF3Iso6z5HhfiI/pub?output=csv"
+    with st.spinner("Enriching user profiles..."):
+        crm_df = load_crm_data(sheet_url)
+        enriched_users_df = enrich_user_data(df, crm_df)
+
     # Sidebar Navigation
-    st.sidebar.image(os.path.join("homepage_images", "logo1.jpg"), width=200)
-    st.sidebar.markdown("<div style='margin-top: -10px; margin-bottom: 20px; color: #666;'>Communlytics by Kiefer analytics</div>", unsafe_allow_html=True)
-    st.sidebar.title("Navigation")
-    dashboard_mode = st.sidebar.radio(
-        "Select Dashboard", 
-        ["Community Health", "User Analysis", "Tasks", "Bulk Messaging"],
-        key="selected_dashboard"
-    )
+    st.sidebar.image(os.path.join("homepage_images", "logo2.png"), use_container_width=True)
+    # Define menu options
+    menu_options = ["Community Health", "User Analysis", "Tasks", "Bulk Messaging", "My TO-DO List"]
+    menu_icons = ["activity", "person-lines-fill", "list-task", "envelope", "check2-square"]
+    
+    # Determine default index based on session state
+    # Determine default index based on session state
+    # (Removed manual index calculation in favor of key binding)
+
+    with st.sidebar:
+        selected = option_menu(
+            "Main Menu",
+            menu_options,
+            icons=menu_icons,
+            menu_icon="cast",
+            default_index=0, # Fallback, but key takes precedence
+            key='selected_dashboard'
+        )
+    
+    # Update local variable for consistency (though it's in state now)
+    dashboard_mode = st.session_state['selected_dashboard']
+
+    # --- Settings Removed (HubSpot Auth) ---
+
+
 
     st.sidebar.divider()
     st.sidebar.subheader("Global Filters")
@@ -75,6 +317,28 @@ def main():
 
     # Filter DF by selected workspaces for all subsequent logic
     df_ws = df[df['workspace'].isin(selected_workspaces)]
+    
+    # Global Date Filter
+    min_date = df_ws['date'].min()
+    max_date = df_ws['date'].max()
+    
+    # Default to last 180 days to ensure we catch Reddit data (which might be older than Slack updates)
+    default_end = max_date
+    default_start = max(min_date, max_date - timedelta(days=180))
+    
+    date_range = st.sidebar.date_input(
+        "Select Date Range",
+        value=(default_start, default_end),
+        min_value=min_date,
+        max_value=max_date
+    )
+
+    # Validate date range selection
+    if len(date_range) != 2:
+        st.warning("Please select a start and end date.")
+        return
+        
+    start_date, end_date = date_range
 
     # --- Dashboard 1: Community Health ---
     if dashboard_mode == "Community Health":
@@ -83,31 +347,9 @@ def main():
         all_channels = sorted(df_ws['channel'].unique())
         selected_channels = st.sidebar.multiselect("Filter by Channel", all_channels, default=all_channels)
         
-        # Date Filter
-        min_date = df_ws['date'].min()
-        max_date = df_ws['date'].max()
-        
-        # Default to last 180 days to ensure we catch Reddit data (which might be older than Slack updates)
-        default_end = max_date
-        default_start = max(min_date, max_date - timedelta(days=180))
-        
-        date_range = st.sidebar.date_input(
-            "Select Date Range",
-            value=(default_start, default_end),
-            min_value=min_date,
-            max_value=max_date
-        )
-        
         if not selected_channels:
             st.warning("Please select at least one channel.")
             return
-
-        # Validate date range selection
-        if len(date_range) != 2:
-            st.warning("Please select a start and end date.")
-            return
-            
-        start_date, end_date = date_range
 
         filtered_df = df_ws[
             (df_ws['channel'].isin(selected_channels)) & 
@@ -121,69 +363,158 @@ def main():
         col3.metric("Date Range", f"{filtered_df['date'].min()} to {filtered_df['date'].max()}")
 
         st.subheader("Engagement Distribution")
-        type_counts = filtered_df['Message Type'].value_counts().reset_index()
-        type_counts.columns = ['Message Type', 'Count']
-        fig_bar = px.bar(type_counts, x='Message Type', y='Count', color='Message Type', title="Total Messages by Type")
-        st.plotly_chart(fig_bar, use_container_width=True)
         
-        st.subheader("Daily Activity Trend")
-        daily_activity = filtered_df.groupby(['date', 'Message Type']).size().reset_index(name='Count')
-        fig_line = px.area(daily_activity, x='date', y='Count', color='Message Type', title="Daily Message Volume by Type")
-        st.plotly_chart(fig_line, use_container_width=True)
+        col_dist1, col_dist2 = st.columns(2)
+        
+        with col_dist1:
+            type_counts = filtered_df['Message Type'].value_counts().reset_index()
+            type_counts.columns = ['Message Type', 'Count']
+            fig_bar = px.bar(type_counts, x='Message Type', y='Count', color='Message Type', title="Total Messages by Type")
+            st.plotly_chart(fig_bar, use_container_width=True)
+            
+             
+        with col_dist2:
+            # Calculate Monthly Unique Members
+            # Ensure date is in datetime format for manipulation, though it might be date object
+            # efficient way to extract month-year from date object
+            if not filtered_df.empty:
+                # Create a copy to avoid SettingWithCopyWarning on the original filtered_df view
+                df_monthly = filtered_df.copy()
+                # Convert to string YYYY-MM for robust grouping
+                df_monthly['month_year'] = pd.to_datetime(df_monthly['date']).dt.to_period('M').astype(str)
+                
+                monthly_unique = df_monthly.groupby('month_year')['user'].nunique().reset_index()
+                monthly_unique.columns = ['Month', 'Unique Members']
+                
+                fig_monthly = px.line(
+                    monthly_unique, 
+                    x='Month', 
+                    y='Unique Members', 
+                    title="Monthly Unique Members Writing a Message",
+                    color_discrete_sequence=['#00008B'], # Dark Blue color
+                    markers=True,
+                    text='Unique Members'
+                )
+                fig_monthly.update_traces(textposition="top center")
+                st.plotly_chart(fig_monthly, use_container_width=True)
+            else:
+                st.info("No data for monthly analysis")
+        
+        st.subheader("Activity & Trends")
+        col_trend1, col_trend2 = st.columns(2)
+        
+        with col_trend1:
+            st.markdown("#### Daily Message Volume")
+            daily_activity = filtered_df.groupby(['date', 'Message Type']).size().reset_index(name='Count')
+            fig_line = px.area(daily_activity, x='date', y='Count', color='Message Type', title="")
+            fig_line.update_layout(legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=-0.3,
+                xanchor="center",
+                x=0.5
+            ))
+            st.plotly_chart(fig_line, use_container_width=True)
+            
+        with col_trend2:
+             st.markdown("#### Trending Technical Words (All Time)")
+             
+             @st.cache_data(show_spinner=False)
+             def get_cached_wordcloud(data_frame):
+                 if data_frame.empty:
+                     return None
+                 text = " ".join(data_frame['sentences'].astype(str))
+                 return generate_wordcloud(text)
 
-        st.subheader("Top 10 Slack Contributors (pythondev)")
+             with st.spinner("Generating word cloud from global data..."):
+                 # Use global 'df' instead of 'filtered_df'
+                 wc_image = get_cached_wordcloud(df)
+            
+             if wc_image is not None:
+                 st.image(wc_image, use_container_width=True)
+             else:
+                 st.info("No data available for word cloud.")
+
+        st.subheader("Community Contributors Table")
         
         if not filtered_df.empty:
-            # Filter specifically for pythondev to show Slack contributors
-            slack_only_df = filtered_df[filtered_df['workspace'] == 'pythondev']
-            
-            # 1. Identify Top 10 Users by Message Count
-            top_users = slack_only_df['user'].value_counts().head(10).index.tolist()
-            
-            if not top_users:
-                st.info("No Slack contributors found in this date range. Try expanding the Date Range in the sidebar to include 2017.")
-            
-            table_data = []
-            emojis = {1: "😠", 2: "🙁", 3: "😐", 4: "🙂", 5: "😃"}
+            # Aggregate stats for the SELECTED PERIOD
+            period_stats = filtered_df.groupby('user').agg({
+                'sentences': 'count',
+                'channel': lambda x: list(x.value_counts().head(2).index)
+            })
 
-            # 2. Iterate and Calculate Stats
-            
-            # Header Row
-            h1, h2, h3, h4, h5, h6 = st.columns([2, 1, 2, 1, 2, 1.5])
-            h1.markdown("**User**")
-            h2.markdown("**Msgs**")
-            h3.markdown("**Top Channels**")
-            h4.markdown("**Mood**")
-            h5.markdown("**Persona**")
-            h6.markdown("**Action**")
-            st.divider()
+            # Join with Enriched Data (Global Context)
+            # We use 'inner' join to only show users active in this period, 
+            # or 'left' on period_stats to match
+            display_df = period_stats.join(enriched_users_df, how='left')
+            display_df = display_df.reset_index()
 
-            for user in top_users:
-                user_data = filtered_df[filtered_df['user'] == user]
+            # Format Columns
+            display_df = display_df.rename(columns={'user': 'User', 'sentences': 'Messages'})
+            
+            # Helper to format list
+            def fmt_channels(x): 
+                if isinstance(x, list): return ", ".join(x)
+                return str(x)
                 
-                # Top Channels
-                top_channels = user_data['channel'].value_counts().head(3).index.tolist()
-                channels_str = ", ".join(top_channels)
+            display_df['Top Channels'] = display_df['channel'].apply(fmt_channels)
+            display_df['Is Client?'] = display_df['Is_Client'].apply(lambda x: "✅ Yes" if x is True else "No")
+            
+            # Sentiment Emoji Logic (1-5 Scale)
+            sentiment_emojis = {1: "😠", 2: "🙁", 3: "😐", 4: "🙂", 5: "😃"}
+            def get_sentiment_emoji(score):
+                try:
+                    return sentiment_emojis.get(int(round(score)), "😐")
+                except:
+                    return "😐"
+            
+            display_df['Sentiment'] = display_df['Mood_Score'].apply(get_sentiment_emoji)
+            display_df['Avg Sentiment'] = display_df['Mood_Score'].round(2)
+
+            # Select Final Columns
+            cols = ["User", "Messages", "Top Channels", "Avg Sentiment", "Sentiment", "Persona", "Is Client?"]
+            # Fill NaNs for safety
+            display_df = display_df[cols].fillna("Unknown")
+                 
+            # --- Filters ---
+            f1, f2 = st.columns(2)
+            with f1:
+                all_personas = sorted(display_df['Persona'].unique())
+                sel_personas = st.multiselect("Filter by Persona", all_personas)
                 
-                # Sentiment
-                avg_sentiment = user_data['Sentiment Score'].mean()
-                sentiment_level = int(round(avg_sentiment))
-                sentiment_emoji = emojis.get(sentiment_level, "😐")
+            with f2:
+                all_sentiments = sorted(display_df['Sentiment'].unique())
+                sel_sentiments = st.multiselect("Filter by Sentiment", all_sentiments)
                 
-                # Persona
-                persona, _, _ = get_user_persona(user_data, user_data['sentences'])
+            # Apply Filters
+            if sel_personas:
+                display_df = display_df[display_df['Persona'].isin(sel_personas)]
+            if sel_sentiments:
+                display_df = display_df[display_df['Sentiment'].isin(sel_sentiments)]
                 
-                # Render Row
-                c1, c2, c3, c4, c5, c6 = st.columns([2, 1, 2, 1, 2, 1.5])
-                
-                c1.write(user)  
-                c2.write(f"{len(user_data)}")
-                c3.caption(channels_str)
-                c4.write(sentiment_emoji)
-                c5.caption(persona)
-                
-                # Button for Details
-                c6.button("More Details", key=f"btn_{user}", on_click=go_to_user, args=(user,))
+            st.caption(f"Showing {len(display_df)} users.")
+            
+            st.dataframe(
+                display_df,
+                column_config={
+                    "Avg Sentiment": st.column_config.NumberColumn(
+                        "Score",
+                        help="1 (Negative) to 5 (Positive)",
+                        format="%.2f"
+                    ),
+                    "Sentiment": st.column_config.Column(
+                        "Sentiment",
+                        help="Sentiment Emojis"
+                    ),
+                    "Is Client?": st.column_config.TextColumn(
+                        "Is Client?",
+                        help="Matched in CRM Sheet"
+                    )
+                },
+                hide_index=True,
+                use_container_width=True
+            )
             
         else:
             st.info("No data available for the selected range.")
@@ -255,6 +586,13 @@ def main():
             daily_activity_user = user_df.groupby(['date', 'Message Type']).size().reset_index(name='Count')
             if not daily_activity_user.empty:
                 fig_line_user = px.bar(daily_activity_user, x='date', y='Count', color='Message Type', title="Daily Activity")
+                fig_line_user.update_layout(legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=-0.3,
+                    xanchor="center",
+                    x=0.5
+                ))
                 st.plotly_chart(fig_line_user, use_container_width=True)
             else:
                 st.info("No data available for timeline.")
@@ -266,16 +604,29 @@ def main():
         unanswered_user = user_df[user_df['is_unanswered']]
         
         if not unanswered_user.empty:
-             # Display readable table
-             display_cols = ['ts', 'channel', 'sentences']
-             st.dataframe(unanswered_user[display_cols].sort_values('ts', ascending=False), use_container_width=True)
+             # Sort by timestamp
+             unanswered_user = unanswered_user.sort_values('ts', ascending=False)
+             
+             # Filter resolved
+             visible_user_tasks = [i for i in unanswered_user.index if i not in st.session_state['resolved_tasks']]
+             
+             if not visible_user_tasks:
+                 st.success("All questions resolved for this user.")
+             else:
+                 # Render cards
+                 for index in visible_user_tasks:
+                     row = df.loc[index]
+                     # Use 'ua' prefix to avoid key collisions if needed, but index is unique so it's fine.
+                     # Actually index is unique across DF, so keys like f"gen_{index}" will match the Task dashboard.
+                     # This means state is shared! That's actually a feature (draft in one place, see it in another).
+                     render_task_card(index, row)
         else:
             st.success("Great! No unanswered questions found for this user.")
 
     # --- Dashboard 3: Tasks ---
     elif dashboard_mode == "Tasks":
         st.header("Unanswered Questions (Tasks Management)")
-        st.info("This dashboard lists all questions that have not received a direct response (mentioning the asker) within 24 hours.")
+        st.info("This dashboard lists all questions that have not received a direct response (mentioning the asker) within 48 hours.")
         
         # Filter: Channel
         all_channels = sorted(df_ws['channel'].unique())
@@ -287,7 +638,9 @@ def main():
             
         filtered_tasks = df_ws[
             (df_ws['channel'].isin(selected_channels_tasks)) & 
-            (df_ws['is_unanswered'])
+            (df_ws['is_unanswered']) &
+            (df_ws['date'] >= start_date) & 
+            (df_ws['date'] <= end_date)
         ]
         
         st.metric("Total Unanswered Questions", len(filtered_tasks))
@@ -302,97 +655,47 @@ def main():
             if not visible_tasks:
                  st.success("No unanswered questions found in selected channels! (All resolved)")
             else:
-                # Limit to 50 recent tasks for performance
-                for index in visible_tasks[:50]:
-                    row = df.loc[index] # Access by label (original index)
-                    user_msg = row['sentences']
-                    ts = row['ts']
-                    user = row['user']
+                # --- Pagination Logic ---
+                items_per_page = 50
+                if 'tasks_page_number' not in st.session_state:
+                    st.session_state['tasks_page_number'] = 0
                     
-                    # Truncate for title
-                    preview = (user_msg[:75] + '..') if len(user_msg) > 75 else user_msg
-                    
-                    with st.expander(f"**{user}** in **#{row['channel']}**: {preview}"):
-                        st.write(f"**Full Question** (asked at {ts}):")
-                        st.info(user_msg)
-                        
-                        with st.expander("📚 Knowledge Base Suggestions", expanded=False):
-                            with st.spinner("Finding similar questions..."):
-                                suggestions = get_top_suggestions(user_msg)
-                            
-                            if not suggestions:
-                                st.write("No similar questions found in knowledge base.")
-                            else:
-                                st.write("Select relevant suggestions to include in AI drafting:")
-                                selected_indices = []
-                                for i, s in enumerate(suggestions):
-                                    if st.checkbox(f"**{s['similarity']:.1%} Match**: {s['question'][:100]}...", key=f"kb_{index}_{i}"):
-                                        selected_indices.append(i)
-                                    with st.container():
-                                        st.caption(f"**Answer**: {s['answer'][:200]}...")
-                                
-                                if st.button("✨ Generate Draft with Gemini", key=f"gen_{index}"):
-                                    if not selected_indices:
-                                        st.warning("Please select at least one suggestion.")
-                                    else:
-                                        chosen = [suggestions[i] for i in selected_indices]
-                                        # Get current draft if user already typed something
-                                        current_draft_content = st.session_state.get(f"resp_{index}", "")
-                                        with st.spinner("Gemini is drafting a response..."):
-                                            draft = generate_ai_response(user_msg, chosen, existing_draft=current_draft_content)
-                                            st.session_state['ai_drafts'][index] = draft
-                                            # Directly update the text area's session state key
-                                            st.session_state[f"resp_{index}"] = draft
-                                            st.rerun()
-
-                        # Work Area
-                        # Use session state to handle the text area value
-                        if f"resp_{index}" not in st.session_state:
-                             st.session_state[f"resp_{index}"] = st.session_state['ai_drafts'].get(index, "")
-                        
-                        respond_text = st.text_area("Draft Response / Notes:", key=f"resp_{index}")
-                        
-                        # Sync back to our persistent draft storage
-                        st.session_state['ai_drafts'][index] = respond_text
-                        
-                        # Action Buttons
-                        col_a, col_b, col_c, col_d, col_e = st.columns(5)
-                        
-                        if col_a.button("✉️ Private Reply", key=f"priv_{index}"):
-                            with st.spinner("Sending private message..."):
-                                success, msg = send_private_reply("rano", user, respond_text)
-                                if success:
-                                    st.toast(msg, icon="✅")
-                                else:
-                                    st.error(msg)
-                            
-                        if col_b.button("📢 Channel Reply", key=f"chan_{index}"):
-                            with st.spinner("Posting to #test..."):
-                                success, msg = send_channel_reply("#test", respond_text)
-                                if success:
-                                    st.toast(msg, icon="✅")
-                                else:
-                                    st.error(msg)
-                            
-                        if col_c.button("📋 Trello Task", key=f"trello_{index}"):
-                            with st.spinner("Creating Trello card..."):
-                                success, msg = add_trello_task(user, user_msg, respond_text)
-                                if success:
-                                    st.toast(msg, icon="✅")
-                                else:
-                                    st.error(msg)
-                            
-                        if col_d.button("☁️ Salesforce Log", key=f"sf_{index}"):
-                             st.toast("Feature Coming Soon!", icon="🚧")
-    
-                        
-                        if col_e.button("✅ Resolve", key=f"res_{index}"):
-                             st.session_state['resolved_tasks'].add(index)
-                             st.toast("Task marked as resolved!", icon="🎉")
-                             st.rerun()
+                total_pages = (len(visible_tasks) - 1) // items_per_page + 1
+                curr_page = st.session_state['tasks_page_number']
                 
-                if len(visible_tasks) > 50:
-                    st.warning(f"Showing top 50 of {len(visible_tasks)} tasks. Resolve tasks to see more.")
+                # Ensure valid page
+                if curr_page >= total_pages: curr_page = total_pages - 1
+                if curr_page < 0: curr_page = 0
+                st.session_state['tasks_page_number'] = curr_page
+                
+                start_idx = curr_page * items_per_page
+                end_idx = start_idx + items_per_page
+                
+                # Display Controls Top (optional, or just bottom)
+                st.caption(f"Showing page {curr_page + 1} of {total_pages} ({len(visible_tasks)} tasks total)")
+                
+                current_page_tasks = visible_tasks[start_idx:end_idx]
+                
+                for index in current_page_tasks:
+                    row = df.loc[index] # Access by label (original index)
+                    render_task_card(index, row)
+                
+                # --- Pagination Controls Bottom ---
+                st.markdown("---")
+                col_prev, col_page, col_next = st.columns([1, 2, 1])
+                
+                with col_prev:
+                    if st.button("Previous Page", disabled=(curr_page == 0)):
+                        st.session_state['tasks_page_number'] -= 1
+                        st.rerun()
+                        
+                with col_page:
+                    st.markdown(f"**Page {curr_page + 1} / {total_pages}**", unsafe_allow_html=True)
+                    
+                with col_next:
+                    if st.button("Next Page", disabled=(curr_page >= total_pages - 1)):
+                        st.session_state['tasks_page_number'] += 1
+                        st.rerun()
                         
         else:
             st.success("No unanswered questions found in selected channels!")
@@ -466,6 +769,88 @@ def main():
         
         with col_btn2:
             st.button("Create New User Classification", help="Define a new persona rule (Coming Soon)")
+
+    # --- Dashboard 5: My TO-DO List (Moved from Sidebar) ---
+    elif dashboard_mode == "My TO-DO List":
+        st.header("My TO-DO List & Daily Briefing")
+        st.info("Trigger your daily community briefing delivered directly to your Slack.")
+        
+        from ai_utils import generate_community_health_suggestion
+        import time
+        
+        if st.button("🚀 Generate & Send Daily Briefing", type="primary"):
+            with st.spinner("Analyzing community and sending daily briefing..."):
+            
+                # --- Message 1: Community Health ---
+                # Calculate simple metrics (Last 7 days vs Previous 7 days)
+                now = df['date'].max()
+                last_7 = df[df['date'] > (now - timedelta(days=7))]
+                prev_7 = df[(df['date'] <= (now - timedelta(days=7))) & (df['date'] > (now - timedelta(days=14)))]
+                
+                msg_count_now = len(last_7)
+                msg_count_prev = len(prev_7)
+                
+                delta = msg_count_now - msg_count_prev
+                trend = "INCREASE" if delta >= 0 else "REDUCTION"
+                
+                top_types = last_7['Message Type'].value_counts().head(3).to_dict()
+                
+                status_text = (
+                    f"Comparison (Last 7 Days vs Previous):\n"
+                    f"- Total Messages: {msg_count_now} (Trend: {trend} of {abs(delta)})\n"
+                    f"- Active Users: {last_7['user'].nunique()} (vs {prev_7['user'].nunique()})\n"
+                    f"- Top Message Types: {top_types}"
+                )
+                
+                # Use a simpler placeholder if API key not valid/set to avoid hard crash
+                try:
+                    ai_recommendation = generate_community_health_suggestion(status_text)
+                except:
+                    ai_recommendation = "AI suggestions unavailable."
+                
+                msg1 = (
+                    f"*Community Health Update*\n"
+                    f"{status_text}\n\n"
+                    f"*AI Recommendation:*\n{ai_recommendation}\n\n"
+                    f"Dashboard: http://localhost:8501/?dashboard=Community%20Health"
+                )
+                
+                s1, e1 = send_private_reply("rano", "Ran", msg1, simulate_typing=True)
+                if not s1: st.error(f"Msg 1 failed: {e1}")
+                time.sleep(1.5)
+                
+                # --- Message 2: Unanswered Tasks ---
+                unanswered_count = len(df[df['is_unanswered']])
+                msg2 = (
+                    f"*Task Alert*\n"
+                    f"You have *{unanswered_count}* unanswered questions pending.\n"
+                    f"Go to Tasks dashboard to answer multiple queries by your users.\n"
+                    f"View Tasks: http://localhost:8501/?dashboard=Tasks"
+                )
+                s2, e2 = send_private_reply("rano", "Ran", msg2, simulate_typing=True)
+                if not s2: st.error(f"Msg 2 failed: {e2}")
+                time.sleep(1.5)
+                
+                # --- Message 3: Retention (Mock) ---
+                msg3 = (
+                    f"Retention Risk Alert\n"
+                    f"Our model flagged **3 key members** at risk of churn this week.\n"
+                    f"This feature is coming soon to your dashboard.\n"
+                    f"Stay tuned: http://localhost:8501"
+                )
+                s3, e3 = send_private_reply("rano", "Ran", msg3, simulate_typing=True)
+                if not s3: st.error(f"Msg 3 failed: {e3}")
+                time.sleep(1.5)
+                
+                # --- Message 4: General ---
+                msg4 = (
+                    f"Anything else would you like to do this week?\n"
+                    f"http://localhost:8501"
+                )
+                s4, e4 = send_private_reply("rano", "Ran", msg4, simulate_typing=True)
+                if not s4: st.error(f"Msg 4 failed: {e4}")
+                
+                st.success("✅ To-Do List Sent to Slack!")
 
 if __name__ == "__main__":
     main()
