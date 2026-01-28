@@ -7,9 +7,12 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud, STOPWORDS
-from transformers import pipeline
-import torch
+
+# from transformers import pipeline # Lazy loaded
+# import torch # Lazy loaded
 from sqlalchemy import create_engine, text
+import io
+
 
 # --- Helper Functions ---
 # Load from environment variable (security best practice)
@@ -238,6 +241,7 @@ def load_keyword_extractor():
     Cached to avoid reloading on every run.
     """
     try:
+        from transformers import pipeline
         # device=0 if cuda is available, else -1 for cpu. 
         # auto-detection is safer but let's stick to cpu/auto for compatibility
         pipe = pipeline("text2text-generation", model="ilsilfverskiold/tech-keywords-extractor")
@@ -313,6 +317,47 @@ def generate_wordcloud(text):
     except Exception as e:
         st.error(f"Error generating word cloud: {e}")
         return None
+
+def get_cached_wordcloud_from_db():
+    """
+    Retrieves the pre-calculated wordcloud image from the Postgres 'app_cache' table.
+    """
+    try:
+        engine = get_db_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT value FROM app_cache WHERE key = 'global_wordcloud'"))
+            row = result.fetchone()
+            
+            if row and row[0]:
+                import matplotlib.pyplot as plt
+                import matplotlib.image as mpimg
+                # Bytes to Image
+                image = mpimg.imread(io.BytesIO(row[0]), format='png')
+                return image
+    except Exception as e:
+        print(f"Failed to fetch cached wordcloud: {e}")
+    return None
+
+def save_wordcloud_to_db(image_bytes):
+    """
+    Saves the wordcloud bytes to the Postgres 'app_cache' table.
+    """
+    try:
+        engine = get_db_engine()
+        with engine.connect() as conn:
+            # Upsert
+            conn.execute(text("""
+                INSERT INTO app_cache (key, value, updated_at)
+                VALUES ('global_wordcloud', :val, NOW())
+                ON CONFLICT (key) 
+                DO UPDATE SET value = :val, updated_at = NOW()
+            """), {"val": image_bytes})
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Failed to save wordcloud cache: {e}")
+        return False
+
 
 def get_user_persona(metrics_df, messages_series):
     total_msgs = len(messages_series)

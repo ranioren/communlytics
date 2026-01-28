@@ -15,3 +15,5 @@ nest_asyncio
 psycopg2-binary
 sqlalchemy
 pgvector
+streamlit-vis-timeline
+streamlit-vis-timeline

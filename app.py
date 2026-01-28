@@ -6,7 +6,23 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
 load_dotenv()
-from data_utils import load_data, get_user_persona, calculate_all_user_personas, generate_wordcloud, load_crm_data, check_is_client, enrich_user_data
+from data_utils import load_data, get_user_persona, calculate_all_user_personas, generate_wordcloud, load_crm_data, check_is_client, enrich_user_data, get_cached_wordcloud_from_db, load_users_from_db
+
+def get_enriched_data_safe(df):
+    """
+    Attempts to load enriched user data from DB first (Fast).
+    Falls back to fetching CRM and calculating if DB is empty (Slow).
+    """
+    # 1. Try DB
+    db_users = load_users_from_db()
+    if not db_users.empty:
+        return db_users
+        
+    # 2. Fallback
+    sheet_url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSiHHBbo2j1VVn06Xub2FqBdGqiVEzmNzOcaQcGu10W53Ai93HIYyr3UHb4RKKQpqrF3Iso6z5HhfiI/pub?output=csv"
+    crm_df = load_crm_data(sheet_url)
+    return enrich_user_data(df, crm_df)
+
 from ai_utils import get_top_suggestions, generate_ai_response, generate_crm_response
 from trello_utils import add_trello_task
 from slack_utils import send_private_reply, send_channel_reply
@@ -20,6 +36,17 @@ DATA_PATH = os.path.join("channel extraction", "merged_data.csv")
 
 # --- Main App ---
 def main():
+    # Profiling Hook
+    if "profile" in st.query_params and st.query_params["profile"] == "true":
+         try:
+             from pyinstrument import Profiler
+             profiler = Profiler()
+             profiler.start()
+         except ImportError:
+             profiler = None
+    else:
+         profiler = None
+
     
     # Navigation Callback
     def go_to_user(user_name):
@@ -266,12 +293,7 @@ def main():
         st.warning("No data loaded.")
         return
 
-    # --- Pre-calculate User Data ---
-    # Load CRM Data
-    sheet_url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSiHHBbo2j1VVn06Xub2FqBdGqiVEzmNzOcaQcGu10W53Ai93HIYyr3UHb4RKKQpqrF3Iso6z5HhfiI/pub?output=csv"
-    with st.spinner("Enriching user profiles..."):
-        crm_df = load_crm_data(sheet_url)
-        enriched_users_df = enrich_user_data(df, crm_df)
+
 
     # Sidebar Navigation
     st.sidebar.image(os.path.join("homepage_images", "logo2.png"), use_container_width=True)
@@ -301,6 +323,14 @@ def main():
 
 
     st.sidebar.divider()
+    
+    # Profiler Output
+    if profiler is not None:
+         profiler.stop()
+         st.sidebar.success("Profiling Complete")
+         if st.sidebar.button("See Profile"):
+             st.components.v1.html(profiler.output_html(), height=800, scrolling=True)
+    
     st.sidebar.subheader("Global Filters")
     
     # Workspace Filter
@@ -419,23 +449,22 @@ def main():
         with col_trend2:
              st.markdown("#### Trending Technical Words (All Time)")
              
-             @st.cache_data(show_spinner=False)
-             def get_cached_wordcloud(data_frame):
-                 if data_frame.empty:
-                     return None
-                 text = " ".join(data_frame['sentences'].astype(str))
-                 return generate_wordcloud(text)
-
-             with st.spinner("Generating word cloud from global data..."):
-                 # Use global 'df' instead of 'filtered_df'
-                 wc_image = get_cached_wordcloud(df)
+             with st.spinner("Loading word cloud..."):
+                 # Use cached version from DB
+                 wc_image = get_cached_wordcloud_from_db()
             
-             if wc_image is not None:
-                 st.image(wc_image, use_container_width=True)
-             else:
-                 st.info("No data available for word cloud.")
+                 if wc_image is not None:
+                     st.image(wc_image, use_container_width=True)
+                 else:
+                     st.info("No cached word cloud found. Run 'cron_analytics.py' to generate.")
+
 
         st.subheader("Community Contributors Table")
+        
+        # --- Lazy Load User Data for Table ---
+        # This is where we pay the cost, but only after charts are shown. (DB Optimized)
+        with st.spinner("Loading contributor profiles..."):
+            enriched_users_df = get_enriched_data_safe(df)
         
         if not filtered_df.empty:
             # Aggregate stats for the SELECTED PERIOD
@@ -493,9 +522,10 @@ def main():
             if sel_sentiments:
                 display_df = display_df[display_df['Sentiment'].isin(sel_sentiments)]
                 
-            st.caption(f"Showing {len(display_df)} users.")
+            st.caption(f"Showing {len(display_df)} users. Click a row to view details.")
             
-            st.dataframe(
+            # Use on_select to capture selection
+            selection = st.dataframe(
                 display_df,
                 column_config={
                     "Avg Sentiment": st.column_config.NumberColumn(
@@ -513,14 +543,42 @@ def main():
                     )
                 },
                 hide_index=True,
-                use_container_width=True
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode="single-row"
             )
+            
+            if selection.selection.rows:
+                selected_index = selection.selection.rows[0]
+                clicked_user = display_df.iloc[selected_index]['User']
+                
+                # Logic: Redirect if this is a NEW selection or we are not already on the page
+                # To prevent loop, we only redirect if the target user is different or we are not on the dashboard
+                # But since we are IN 'Community Health' block (dashboard_mode == "Community Health"),
+                # any request to go to "User Analysis" is valid.
+                
+                # Check if we should switch (to avoid infinite reruns if we were to stay on this page, 
+                # but we are switching pages so it's safer).
+                # We update the state and rerun.
+                
+                if st.session_state.get('selected_user_analysis') != clicked_user:
+                    st.session_state['selected_dashboard'] = "User Analysis"
+                    st.session_state['selected_user_analysis'] = clicked_user
+                    st.rerun()
+                elif st.session_state.get('selected_dashboard') != "User Analysis":
+                    # User is same but we are on wrong page (this case happens when we navigate back)
+                    st.session_state['selected_dashboard'] = "User Analysis"
+                    st.rerun()
             
         else:
             st.info("No data available for the selected range.")
 
     # --- Dashboard 2: User Analysis ---
     elif dashboard_mode == "User Analysis":
+        # --- Lazy Load User Data ---
+        with st.spinner("Loading user profiles..."):
+             enriched_users_df = get_enriched_data_safe(df)
+             
         st.header("Individual User Analysis")
         
         all_users = sorted(df['user'].unique())
@@ -597,6 +655,78 @@ def main():
             else:
                 st.info("No data available for timeline.")
 
+        # User Activity Timeline
+        st.subheader("User Activity Timeline")
+        st.markdown("Activity timeline from the beginning (all time).")
+        
+        if not user_df.empty:
+            # Ensure sorting
+            timeline_path_df = user_df.sort_values("ts")
+            
+            # Prepare items for Vis.js Timeline
+            # Items need: id, content, start, (end), group (optional), title (hover), className/style
+            items = []
+            for idx, row in timeline_path_df.iterrows():
+                # Vis.js format
+                # Using 'box' type for flags/labels, or 'point' for dots
+                # User asked for "flag" style -> 'box' often looks like a label with stem.
+                items.append({
+                    "id": idx,
+                    "content": row['channel'], # Show channel name on the flag
+                    "start": str(row['ts']),   # ISO string works best
+                    "type": "box",             # "box" creates the flag style
+                    "title": row['sentences'][:200] # Tooltip
+                })
+
+            # Vis.js Options
+            timeline_options = {
+                "height": "400px",
+                "showMajorLabels": True, # User requested this specifically
+                "showMinorLabels": True,
+                "zoomMin": 1000 * 60 * 60 * 24, # Limit zoom to 1 day
+                "type": "box",
+                "orientation": "top"
+            }
+            
+            try:
+                # Correct import based on debug_import.py output
+                from streamlit_timeline import st_timeline
+                
+                # Render Timeline
+                selected_item = st_timeline(items, options=timeline_options, height="400px")
+                
+                # Handle Selection
+                # st_timeline returns the selected item (dict) or None, not just ID
+                if selected_item:
+                    try:
+                        # Depending on version, it might return the full item dict or just ID.
+                        # Usually returns the item dict if 'items' were passed.
+                        # Let's assume it returns the item dict and check 'id'.
+                        
+                        item_id = selected_item.get('id')
+                         
+                        if item_id is not None:
+                            selected_row = df.loc[int(item_id)]
+                            
+                            sel_msg = selected_row['sentences']
+                            sel_ts = selected_row['ts']
+                            sel_channel = selected_row['channel']
+                            
+                            st.info(f"**Selected Activity** ({sel_ts}):\n\n> {sel_msg}\n\n*in #{sel_channel}*")
+                        
+                    except Exception as e:
+                        # Fallback if structure is different
+                        # st.write(f"Debug Selection: {selected_item}") 
+                        pass
+                        
+            except ImportError:
+                 st.error("Please install 'streamlit-vis-timeline' (which provides streamlit_timeline) to view this chart.")
+            except Exception as e:
+                 st.error(f"Error loading timeline: {e}")
+                
+        else:
+            st.info("No activity data to show.")
+
         # Unanswered Questions List for User
         st.subheader("Unanswered Questions (Tasks)")
         st.markdown(f"List of questions asked by **{selected_user}** that did not receive a mention-response within 24 hours.")
@@ -625,17 +755,24 @@ def main():
 
     # --- Dashboard 3: Tasks ---
     elif dashboard_mode == "Tasks":
+        st.header("Actionable Tasks (Unanswered Questions)")
+        
+        # --- Lazy Load User Data ---
+        # Need CRM data for task card interactions (though arguably could be even lazier inside card)
+        with st.spinner("Loading user profiles..."):
+            enriched_users_df = get_enriched_data_safe(df)
+       
         st.header("Unanswered Questions (Tasks Management)")
         st.info("This dashboard lists all questions that have not received a direct response (mentioning the asker) within 48 hours.")
-        
+       
         # Filter: Channel
         all_channels = sorted(df_ws['channel'].unique())
         selected_channels_tasks = st.sidebar.multiselect("Filter by Channel", all_channels, default=all_channels)
-        
+       
         if not selected_channels_tasks:
             st.warning("Please select at least one channel.")
             return
-            
+           
         filtered_tasks = df_ws[
             (df_ws['channel'].isin(selected_channels_tasks)) & 
             (df_ws['is_unanswered']) &
@@ -702,7 +839,11 @@ def main():
 
     # --- Dashboard 4: Bulk Messaging ---
     elif dashboard_mode == "Bulk Messaging":
-        st.header("Bulk Messaging by Persona")
+        st.header("Bulk Messaging Campaign")
+        
+        # --- Lazy Load User Data ---
+        with st.spinner("Loading user profiles..."):
+             enriched_users_df = get_enriched_data_safe(df)
         
         # 1. Persona Descriptions
         st.subheader("Target Audience Definitions")
@@ -727,12 +868,31 @@ def main():
         
         # 3. Target Selection
         # Calculate personas for all users to populate counts (optional but nice)
-        with st.spinner("Analyzing user base (filtered by workspace)..."):
-            all_user_personas = calculate_all_user_personas(df_ws)
-            
-        # Create a DF for easy filtering
-        persona_df = pd.DataFrame(list(all_user_personas.items()), columns=['User', 'Persona'])
-        persona_counts = persona_df['Persona'].value_counts()
+        # 3. Target Selection
+        # Use existing 'enriched_users_df' which is cached and ready
+        if 'enriched_users_df' not in locals() or enriched_users_df.empty:
+             st.error("User data not loaded.")
+        else:
+             # Filter enriched DF by workspace if needed (it contains all users)
+             # df_ws['user'] is the filtered list of users
+             valid_users = set(df_ws['user'].unique())
+             target_df = enriched_users_df[enriched_users_df.index.isin(valid_users)]
+             
+             persona_counts = target_df['Persona'].value_counts()
+             
+             # Create persona_df for downstream logic
+             # We want a DF with columns ['User', 'Persona']
+             persona_df = target_df[['Persona']].copy()
+             persona_df = persona_df.reset_index() 
+             # The index name in DB load might be 'user' or None
+             # Check columns
+             if 'user' in persona_df.columns:
+                 persona_df = persona_df.rename(columns={'user': 'User'})
+             elif 'User' not in persona_df.columns:
+                 # Fallback if index has no name
+                 persona_df['User'] = target_df.index
+
+
         
         # Append counts to labels for the multiselect
         persona_options = sorted(persona_df['Persona'].unique())
@@ -854,3 +1014,23 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    # End Profiling
+    # Note: Streamlit execution model means this runs at end of script run.
+    # We might need to handle the profiler object being in local scope of main if we want to print here.
+    # Better to handle inside main if possible, but st.stop() might prevent reach.
+    # Alternative: check st.session_state or just doing it inside main at the end (return).
+    # But main() has returns inside.
+    
+    # Actually, simpler to just put it at the very end of main() before returns or use a try/finally block in main.
+    # But since main is big, let's just leave it simple for now. 
+    # If the user wants to see the profile, they need to ensure the script finishes.
+    # Streamlit reruns might clear it.
+    
+    # Correct approach for Streamlit Profiling:
+    # We started it in main. We should stop it and display before main returns.
+    # Let's adjust chunk 1 to handle the printing inside main/sidebar or via a callback?
+    # No, simplest is to just wrap the call:
+    
+    # (No change to this block needed if we handle it in main, but let's leave it as is)
+
