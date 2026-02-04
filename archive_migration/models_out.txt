@@ -1,0 +1,3 @@
+Name: models/gemini-embedding-001
+Supported Methods: ['embedContent', 'countTextTokens', 'countTokens', 'asyncBatchEmbedContent']
+--------------------

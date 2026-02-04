@@ -36,6 +36,15 @@ DATA_PATH = os.path.join("channel extraction", "merged_data.csv")
 
 # --- Main App ---
 def main():
+    # Fix for Bug: "st.session_state.selected_dashboard cannot be modified after widget is instantiated"
+    # We handle programmatic navigation by setting a pending flag, then applying it at the start of the NEXT run.
+    if 'pending_nav' in st.session_state and st.session_state['pending_nav']:
+        target_nav = st.session_state.pop('pending_nav')
+        print(f"DEBUG: Applying pending nav: {target_nav}")
+        st.session_state['selected_dashboard'] = target_nav
+    
+    print(f"DEBUG: Start of Main. selected_dashboard={st.session_state.get('selected_dashboard')}")
+
     # Profiling Hook
     if "profile" in st.query_params and st.query_params["profile"] == "true":
          try:
@@ -66,15 +75,17 @@ def main():
         # Truncate for title
         preview = (user_msg[:75] + '..') if len(user_msg) > 75 else user_msg
         
-        with st.expander(f"**{user}** in **#{channel}**: {preview}"):
+        # Lazy load key
+        kb_lookup_key = f"kb_lookup_{index}"
+        if kb_lookup_key not in st.session_state:
+            st.session_state[kb_lookup_key] = False
+
+        # Keep expanded if we are interacting with it (KB lookup active)
+        is_expanded = st.session_state[kb_lookup_key]
+
+        with st.expander(f"**{user}** in **#{channel}**: {preview}", expanded=is_expanded):
             st.write(f"**Full Question** (asked at {ts}):")
             st.info(user_msg)
-            
-            # Lazy load key
-            kb_lookup_key = f"kb_lookup_{index}"
-            
-            if kb_lookup_key not in st.session_state:
-                    st.session_state[kb_lookup_key] = False
             
             if not st.session_state[kb_lookup_key]:
                     if st.button("🔍 Find Similar Questions", key=f"btn_kb_{index}"):
@@ -302,8 +313,11 @@ def main():
     menu_icons = ["activity", "person-lines-fill", "list-task", "envelope", "check2-square"]
     
     # Determine default index based on session state
-    # Determine default index based on session state
-    # (Removed manual index calculation in favor of key binding)
+    try:
+        current_selection = st.session_state.get('selected_dashboard', "Community Health")
+        default_ix = menu_options.index(current_selection)
+    except ValueError:
+        default_ix = 0
 
     with st.sidebar:
         selected = option_menu(
@@ -311,7 +325,7 @@ def main():
             menu_options,
             icons=menu_icons,
             menu_icon="cast",
-            default_index=0, # Fallback, but key takes precedence
+            default_index=default_ix,
             key='selected_dashboard'
         )
     
@@ -562,12 +576,17 @@ def main():
                 # We update the state and rerun.
                 
                 if st.session_state.get('selected_user_analysis') != clicked_user:
-                    st.session_state['selected_dashboard'] = "User Analysis"
+                    # Queue navigation for next run
+                    st.session_state['pending_nav'] = "User Analysis"
                     st.session_state['selected_user_analysis'] = clicked_user
+                    # Widget 'user_selector' is not rendered yet in this mode, so this is safe:
+                    st.session_state['user_selector'] = clicked_user
                     st.rerun()
                 elif st.session_state.get('selected_dashboard') != "User Analysis":
-                    # User is same but we are on wrong page (this case happens when we navigate back)
-                    st.session_state['selected_dashboard'] = "User Analysis"
+                    # Queue navigation
+                    print(f"DEBUG: Triggering navigation to User Analysis for user: {clicked_user}")
+                    st.session_state['pending_nav'] = "User Analysis"
+                    st.session_state['user_selector'] = clicked_user
                     st.rerun()
             
         else:
@@ -663,19 +682,64 @@ def main():
             # Ensure sorting
             timeline_path_df = user_df.sort_values("ts")
             
+            # --- Filter Timeline Events ---
+            def get_timeline_category(row):
+                if row['is_question']: return "Question"
+                if row['Sentiment Score'] <= 2: return "Negative"
+                if row['Sentiment Score'] >= 4: return "Positive"
+                return "Neutral"
+
+            # Create a temporary column for filtering (safe on copy)
+            timeline_path_df = timeline_path_df.copy()
+            timeline_path_df['Timeline_Category'] = timeline_path_df.apply(get_timeline_category, axis=1)
+
+            all_cats = ["Question", "Negative", "Positive", "Neutral"]
+            # Default to showing all
+            selected_cats = st.multiselect("Filter Timeline Events", all_cats, default=all_cats, key="timeline_filter")
+            
+            # Apply Filter
+            timeline_path_df = timeline_path_df[timeline_path_df['Timeline_Category'].isin(selected_cats)]
+
             # Prepare items for Vis.js Timeline
             # Items need: id, content, start, (end), group (optional), title (hover), className/style
             items = []
             for idx, row in timeline_path_df.iterrows():
                 # Vis.js format
-                # Using 'box' type for flags/labels, or 'point' for dots
                 # User asked for "flag" style -> 'box' often looks like a label with stem.
+                
+                # Logic for Color-Coded Flags
+                # Yellow: Question
+                # Red: Bad (Sentiment <= 2)
+                # Green: Good (Sentiment >= 4) or Response (implied by @ or high score)
+                # Gray: Neutral
+                
+                style_str = ""
+                content_html = row['channel']
+                
+                if row['is_question']:
+                    # Gold/Yellow
+                    style_str = "background-color: #FFD700; color: black; border-color: #DAA520;" 
+                    content_html = f"❓ {row['channel']}"
+                elif row['Sentiment Score'] <= 2:
+                    # Red
+                    style_str = "background-color: #FF4B4B; color: white; border-color: #8B0000;"
+                    content_html = f"😠 {row['channel']}"
+                elif row['Sentiment Score'] >= 4:
+                    # Green
+                    style_str = "background-color: #28a745; color: white; border-color: #006400;"
+                    content_html = f"😃 {row['channel']}"
+                else:
+                    # Light Gray (Neutral)
+                    style_str = "background-color: #E0E0E0; color: black; border-color: #A9A9A9;"
+                    content_html = f"{row['channel']}"
+
                 items.append({
                     "id": idx,
-                    "content": row['channel'], # Show channel name on the flag
-                    "start": str(row['ts']),   # ISO string works best
-                    "type": "box",             # "box" creates the flag style
-                    "title": row['sentences'][:200] # Tooltip
+                    "content": content_html, 
+                    "start": str(row['ts']),   
+                    "type": "box",             
+                    "title": row['sentences'][:200],
+                    "style": style_str
                 })
 
             # Vis.js Options

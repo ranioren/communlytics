@@ -40,3 +40,6 @@ ENV/
 # Office Lock Files
 .~lock.*
 
+
+# Large files
+channel extraction/knowledge_base.pkl

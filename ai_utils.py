@@ -28,7 +28,8 @@ def get_embedding(text):
         result = genai.embed_content(
             model="models/text-embedding-004",
             content=text,
-            task_type="retrieval_query"
+            task_type="retrieval_query",
+            output_dimensionality=768
         )
         return np.array(result['embedding'])
     except Exception as e:
@@ -70,7 +71,7 @@ def get_top_suggestions(query, top_k=3):
         return suggestions
         
     except Exception as e:
-        print(f"Vector search failed: {e}")
+        st.error(f"Vector search failed: {e}")
         # Optional: Fallback to pickle if needed, but we wanted to migrate away.
         return []
 
@@ -201,46 +202,69 @@ def build_knowledge_base(input_csv_path=None, output_pkl_path=None):
     
     print("Generating embeddings via Gemini (batching)...")
     
-    # Simple batching to stay within rate limits
-    for i in tqdm(range(start_idx, len(df))):
-        text = df.iloc[i]['text_for_embedding']
+    # Batch encoding
+    batch_size = 50
+    total_items = len(df)
+    
+    print(f"Starting batch processing. Batch size: {batch_size}. Item count: {total_items}")
+    
+    # We will iterate by batch
+    # We need to handle 'start_idx' correctly. 
+    # If start_idx is 103, we should start at 100 or just slice from 103?
+    # Simpler to slice the dataframe from start_idx
+    
+    df_to_process = df.iloc[start_idx:]
+    
+    # Create batches
+    # We'll use a generator or just loop with step
+    
+    for i in tqdm(range(0, len(df_to_process), batch_size)):
+        # Calculate actual indices in the original dataframe
+        current_batch_df = df_to_process.iloc[i : i + batch_size]
+        batch_texts = current_batch_df['text_for_embedding'].tolist()
         
         max_retries = 3
         for attempt in range(max_retries):
             try:
+                # Gemini embed_content supports list of strings
                 result = genai.embed_content(
                     model="models/text-embedding-004",
-                    content=text,
-                    task_type="retrieval_document"
+                    content=batch_texts,
+                    task_type="retrieval_document",
+                    output_dimensionality=768
                 )
-                embeddings.append(result['embedding'])
                 
-                # Rate limit safety (15 RPM -> 4s gap)
+                # Result['embedding'] should be a list of lists
+                batch_embeddings = result['embedding']
+                
+                if len(batch_embeddings) != len(batch_texts):
+                    raise Exception(f"Mismatch in returned embeddings count. Sent {len(batch_texts)}, got {len(batch_embeddings)}")
+                
+                embeddings.extend(batch_embeddings)
+                
+                # Rate limit safety
+                # 1 request per 4.5s is safe for 15 RPM. 
+                # Since we are doing batch, it is effective 1 request.
                 time.sleep(4.5) 
                 
-                # Checkpoint: Save every 10 rows
-                if (i + 1) % 10 == 0:
-                    df_partial = df.iloc[:len(embeddings)].copy()
-                    df_partial['embedding'] = embeddings
-                    with open(output_pkl_path, 'wb') as f:
-                        pickle.dump(df_partial, f)
+                # Checkpoint: Save every batch
+                df_partial = df.iloc[:len(embeddings)].copy()
+                df_partial['embedding'] = embeddings
+                with open(output_pkl_path, 'wb') as f:
+                    pickle.dump(df_partial, f)
                 
                 break
+                
             except Exception as e:
                 error_str = str(e)
                 if "429" in error_str or "Resource has been exhausted" in error_str:
-                    print(f"\nRate limit hit at {i}. Waiting 60s before retry...")
+                    print(f"\nRate limit hit at batch starting {i}. Waiting 60s before retry...")
                     time.sleep(60) 
                     if attempt == max_retries - 1:
-                        print(f"Failed after {max_retries} attempts at index {i}")
-                        # Save partial
-                        df_partial = df.iloc[:len(embeddings)].copy()
-                        df_partial['embedding'] = embeddings
-                        with open(output_pkl_path, 'wb') as f:
-                            pickle.dump(df_partial, f)
+                        print(f"Failed after {max_retries} attempts.")
                         raise e
                 else:
-                    print(f"Error at index {i}: {e}")
+                    print(f"Error at batch starting {i}: {e}")
                     raise e
 
     df['embedding'] = embeddings
