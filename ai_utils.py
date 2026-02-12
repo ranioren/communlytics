@@ -26,7 +26,7 @@ def get_embedding(text):
     try:
         # Add rate limit handling if needed, but basic call:
         result = genai.embed_content(
-            model="models/text-embedding-004",
+            model="models/gemini-embedding-001",
             content=text,
             task_type="retrieval_query",
             output_dimensionality=768
@@ -228,7 +228,7 @@ def build_knowledge_base(input_csv_path=None, output_pkl_path=None):
             try:
                 # Gemini embed_content supports list of strings
                 result = genai.embed_content(
-                    model="models/text-embedding-004",
+                    model="models/gemini-embedding-001",
                     content=batch_texts,
                     task_type="retrieval_document",
                     output_dimensionality=768

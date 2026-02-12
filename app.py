@@ -30,6 +30,74 @@ from streamlit_option_menu import option_menu
 # import hubspot_utils (Removed)
 from data_utils import load_crm_data
 
+# --- Helper Functions ---
+@st.cache_data
+def get_timeline_items(user_df):
+    """
+    Prepares items for Vis.js Timeline from a user DataFrame.
+    """
+    items = []
+    if user_df.empty:
+        return items
+        
+    timeline_path_df = user_df.sort_values("ts")
+    
+    for idx, row in timeline_path_df.iterrows():
+        # Logic for Color-Coded Flags / Styling
+        # Use pre-calculated attributes if available
+        style_str = row.get('timeline_style', "")
+        content_html = row.get('timeline_content', str(row['channel']))
+
+        # Fallback logic if pre-calc columns missing
+        if not style_str:
+            if row['is_question']:
+                style_str = "background-color: #FFD700; color: black; border-color: #DAA520;" 
+                content_html = f"❓ {str(row['channel'])}"
+            elif row['Sentiment Score'] <= 2:
+                style_str = "background-color: #FF4B4B; color: white; border-color: #8B0000;"
+                content_html = f"😠 {str(row['channel'])}"
+            elif row['Sentiment Score'] >= 4:
+                style_str = "background-color: #28a745; color: white; border-color: #006400;"
+                content_html = f"😃 {str(row['channel'])}"
+            else:
+                style_str = "background-color: #E0E0E0; color: black; border-color: #A9A9A9;"
+                content_html = str(row['channel'])
+
+        items.append({
+            "id": idx,
+            "content": content_html, 
+            "start": str(row['ts']),   
+            "type": "box",             
+            "title": str(row['sentences'])[:200], # Tooltip
+            "style": style_str
+        })
+    return items
+
+def render_timeline_widget(items, height="400px", key_prefix="timeline"):
+    """
+    Renders the Vis.js timeline using streamlit_timeline.
+    """
+    try:
+        from streamlit_timeline import st_timeline
+        
+        timeline_options = {
+            "height": height,
+            "showMajorLabels": True, 
+            "showMinorLabels": True,
+            "zoomMin": 1000 * 60 * 60 * 24, # Limit zoom to 1 day
+            "type": "box",
+            "orientation": "top"
+        }
+        
+        # We must output to a key to avoid collision if multiple timelines exist
+        return st_timeline(items, options=timeline_options, height=height, key=f"{key_prefix}_{hash(str(items)[:100])}")
+    except ImportError:
+        st.error("Timeline component not installed. PLease install streamlit-timeline.")
+        return None
+    except Exception as e:
+        st.error(f"Timeline error: {e}")
+        return None
+
 # --- Configuration & Setup ---
 st.set_page_config(page_title="Slack Engagement Dashboard", layout="wide")
 DATA_PATH = os.path.join("channel extraction", "merged_data.csv")
@@ -515,8 +583,20 @@ def main():
             display_df['Sentiment'] = display_df['Mood_Score'].apply(get_sentiment_emoji)
             display_df['Avg Sentiment'] = display_df['Mood_Score'].round(2)
 
+            # Churn Risk Formatting
+            def format_churn(score):
+                try:
+                    s = float(score)
+                    if s > 75: return f"🔴 High ({s:.0f}%)" # High Risk
+                    if s < 25: return f"🟢 Low ({s:.0f}%)" # Opportunity
+                    return f"{s:.0f}%"
+                except:
+                    return "N/A"
+
+            display_df['Churn Risk Display'] = display_df['Churn Risk'].apply(format_churn)
+
             # Select Final Columns
-            cols = ["User", "Messages", "Top Channels", "Avg Sentiment", "Sentiment", "Persona", "Is Client?"]
+            cols = ["User", "Messages", "Top Channels", "Avg Sentiment", "Sentiment", "Persona", "Is Client?", "Churn Risk Display"]
             # Fill NaNs for safety
             display_df = display_df[cols].fillna("Unknown")
                  
@@ -564,7 +644,12 @@ def main():
             
             if selection.selection.rows:
                 selected_index = selection.selection.rows[0]
-                clicked_user = display_df.iloc[selected_index]['User']
+                # Check if 'User' is in columns, if so use it
+                if 'User' in display_df.columns:
+                    clicked_user = display_df.iloc[selected_index]['User']
+                else: 
+                    # Fallback if index was not reset or rename failed
+                    clicked_user = display_df.index[selected_index]
                 
                 # Logic: Redirect if this is a NEW selection or we are not already on the page
                 # To prevent loop, we only redirect if the target user is different or we are not on the dashboard
@@ -640,7 +725,7 @@ def main():
             persona, confidence, description = get_user_persona(user_df, user_df['sentences'])
 
             # Display Sentiment and Persona side-by-side
-            c1, c2 = st.columns([1, 2])
+            c1, c2, c3 = st.columns([1, 2, 1])
             
             with c1:
                 st.markdown("**Avg Sentiment**")
@@ -651,6 +736,57 @@ def main():
             with c2:
                 st.markdown("**Behavioral Persona**")
                 st.info(f"**{persona}**\n\nConfidence: **{confidence:.0%}**\n\n*{description}*")
+
+            with c3:
+                # Churn Risk Display
+                churn_score_val = "N/A"
+                churn_cat_label = "Unknown"
+                
+                # Look up user in enriched_users_df
+                # data_utils.load_users_from_db returns a DF where 'User' is a column (mapped from 'user')
+                # We need to find the row where User == selected_user
+                
+                if not enriched_users_df.empty:
+                    # Filter for this user
+                    # enriched_users_df is indexed by 'user' (from load_users_from_db)
+                    
+                    if selected_user in enriched_users_df.index:
+                        try:
+                            # Get the row as a Series or DF
+                            user_row = enriched_users_df.loc[selected_user]
+                            if isinstance(user_row, pd.DataFrame):
+                                user_row = user_row.iloc[0]
+                                
+                            if 'Churn Risk' in user_row:
+                                val = float(user_row['Churn Risk'])
+                                churn_score_val = f"{val:.0f}%"
+                                
+                                # Determine Category/Color
+                                if val > 75:
+                                    color = "red"
+                                    churn_cat_label = "High Risk (Churn)"
+                                elif val < 25:
+                                    color = "green"
+                                    churn_cat_label = "Opportunity (Convert)"
+                                else:
+                                    color = "orange"
+                                    churn_cat_label = "Stable"
+                                
+                                st.markdown("**Churn Risk**")
+                                # Color-coded label
+                                st.markdown(f":{color}[**{churn_cat_label}**]")
+                                # Progress bar (0.0 to 1.0)
+                                st.progress(min(1.0, max(0.0, val / 100.0)))
+                                st.caption(f"Score: {churn_score_val}")
+                            else:
+                                st.caption("Risk Score: N/A")
+                                
+                        except Exception as e:
+                            st.caption(f"Error calc risk: {e}")
+                    else:
+                         st.caption("Risk Score: N/A")
+                else:
+                    st.caption("Risk Score: N/A (No Data)")
 
         st.subheader(f"Engagement Breakdown: {selected_user}")
         col_chart1, col_chart2 = st.columns(2)
@@ -702,62 +838,13 @@ def main():
 
             # Prepare items for Vis.js Timeline
             # Items need: id, content, start, (end), group (optional), title (hover), className/style
-            items = []
-            for idx, row in timeline_path_df.iterrows():
-                # Vis.js format
-                # User asked for "flag" style -> 'box' often looks like a label with stem.
-                
-                # Logic for Color-Coded Flags
-                # Yellow: Question
-                # Red: Bad (Sentiment <= 2)
-                # Green: Good (Sentiment >= 4) or Response (implied by @ or high score)
-                # Gray: Neutral
-                
-                style_str = ""
-                content_html = row['channel']
-                
-                if row['is_question']:
-                    # Gold/Yellow
-                    style_str = "background-color: #FFD700; color: black; border-color: #DAA520;" 
-                    content_html = f"❓ {row['channel']}"
-                elif row['Sentiment Score'] <= 2:
-                    # Red
-                    style_str = "background-color: #FF4B4B; color: white; border-color: #8B0000;"
-                    content_html = f"😠 {row['channel']}"
-                elif row['Sentiment Score'] >= 4:
-                    # Green
-                    style_str = "background-color: #28a745; color: white; border-color: #006400;"
-                    content_html = f"😃 {row['channel']}"
-                else:
-                    # Light Gray (Neutral)
-                    style_str = "background-color: #E0E0E0; color: black; border-color: #A9A9A9;"
-                    content_html = f"{row['channel']}"
-
-                items.append({
-                    "id": idx,
-                    "content": content_html, 
-                    "start": str(row['ts']),   
-                    "type": "box",             
-                    "title": row['sentences'][:200],
-                    "style": style_str
-                })
-
-            # Vis.js Options
-            timeline_options = {
-                "height": "400px",
-                "showMajorLabels": True, # User requested this specifically
-                "showMinorLabels": True,
-                "zoomMin": 1000 * 60 * 60 * 24, # Limit zoom to 1 day
-                "type": "box",
-                "orientation": "top"
-            }
+            # Prepare items using helper
+            items = get_timeline_items(timeline_path_df)
             
+            # Render Widget using helper
+            # We use a specific key prefix to avoid collisions
             try:
-                # Correct import based on debug_import.py output
-                from streamlit_timeline import st_timeline
-                
-                # Render Timeline
-                selected_item = st_timeline(items, options=timeline_options, height="400px")
+                selected_item = render_timeline_widget(items, height="400px", key_prefix="user_analysis_timeline")
                 
                 # Handle Selection
                 # st_timeline returns the selected item (dict) or None, not just ID
@@ -818,88 +905,185 @@ def main():
             st.success("Great! No unanswered questions found for this user.")
 
     # --- Dashboard 3: Tasks ---
+    # --- Dashboard 3: Tasks ---
     elif dashboard_mode == "Tasks":
-        st.header("Actionable Tasks (Unanswered Questions)")
+        st.header("Actionable Tasks")
         
         # --- Lazy Load User Data ---
-        # Need CRM data for task card interactions (though arguably could be even lazier inside card)
         with st.spinner("Loading user profiles..."):
             enriched_users_df = get_enriched_data_safe(df)
-       
-        st.header("Unanswered Questions (Tasks Management)")
-        st.info("This dashboard lists all questions that have not received a direct response (mentioning the asker) within 48 hours.")
-       
-        # Filter: Channel
-        all_channels = sorted(df_ws['channel'].unique())
-        selected_channels_tasks = st.sidebar.multiselect("Filter by Channel", all_channels, default=all_channels)
-       
-        if not selected_channels_tasks:
-            st.warning("Please select at least one channel.")
-            return
-           
-        filtered_tasks = df_ws[
-            (df_ws['channel'].isin(selected_channels_tasks)) & 
-            (df_ws['is_unanswered']) &
-            (df_ws['date'] >= start_date) & 
-            (df_ws['date'] <= end_date)
-        ]
-        
-        st.metric("Total Unanswered Questions", len(filtered_tasks))
-        
-        if not filtered_tasks.empty:
-            # Sort by time
-            filtered_tasks = filtered_tasks.sort_values('ts', ascending=False)
             
-            # Filter out resolved tasks (using original index)
-            visible_tasks = [i for i in filtered_tasks.index if i not in st.session_state['resolved_tasks']]
+        # Tabs for the 3 Sections
+        tab1, tab2, tab3 = st.tabs(["Unanswered Questions", "High Churn Risk (Save)", "Conversion Opportunities"])
+        
+        # --- Section 1: Unanswered Questions ---
+        with tab1:
+            st.subheader("Unanswered Questions")
+            st.info("Questions without a reply (mentioning the asker) within 48 hours.")
             
-            if not visible_tasks:
-                 st.success("No unanswered questions found in selected channels! (All resolved)")
+            # Filter: Channel
+            all_channels = sorted(df_ws['channel'].unique())
+            selected_channels_tasks = st.multiselect("Filter by Channel", all_channels, default=all_channels, key="task_channel_filter")
+        
+            if not selected_channels_tasks:
+                st.warning("Please select at least one channel.")
             else:
-                # --- Pagination Logic ---
-                items_per_page = 50
-                if 'tasks_page_number' not in st.session_state:
-                    st.session_state['tasks_page_number'] = 0
+                filtered_tasks = df_ws[
+                    (df_ws['channel'].isin(selected_channels_tasks)) & 
+                    (df_ws['is_unanswered']) &
+                    (df_ws['date'] >= start_date) & 
+                    (df_ws['date'] <= end_date)
+                ]
+                
+                st.metric("Total Unanswered", len(filtered_tasks))
+                
+                if not filtered_tasks.empty:
+                    # Sort by time
+                    filtered_tasks = filtered_tasks.sort_values('ts', ascending=False)
                     
-                total_pages = (len(visible_tasks) - 1) // items_per_page + 1
-                curr_page = st.session_state['tasks_page_number']
+                    # Filter out resolved tasks
+                    visible_tasks = [i for i in filtered_tasks.index if i not in st.session_state['resolved_tasks']]
+                    
+                    if not visible_tasks:
+                         st.success("All caught up! No unanswered questions.")
+                    else:
+                        # Pagination (20 per page)
+                        items_per_page = 20
+                        if 'tasks_page_number' not in st.session_state:
+                            st.session_state['tasks_page_number'] = 0
+                            
+                        total_pages = (len(visible_tasks) - 1) // items_per_page + 1
+                        curr_page = st.session_state['tasks_page_number']
+                        
+                        if curr_page >= total_pages: curr_page = total_pages - 1
+                        if curr_page < 0: curr_page = 0
+                        st.session_state['tasks_page_number'] = curr_page
+                        
+                        start_idx = curr_page * items_per_page
+                        end_idx = start_idx + items_per_page
+                        
+                        # Pagination Controls
+                        c_prev, c_info, c_next = st.columns([1, 2, 1])
+                        with c_prev:
+                            if st.button("Previous", disabled=curr_page==0, key="prev_page"):
+                                st.session_state['tasks_page_number'] -= 1
+                                st.rerun()
+                        with c_info:
+                            st.caption(f"Page {curr_page + 1} of {total_pages}")
+                        with c_next:
+                            if st.button("Next", disabled=curr_page>=total_pages-1, key="next_page"):
+                                st.session_state['tasks_page_number'] += 1
+                                st.rerun()
+                        
+                        current_page_tasks = visible_tasks[start_idx:end_idx]
+                        
+                        for index in current_page_tasks:
+                            row = df.loc[index]
+                            render_task_card(index, row)
+                else:
+                    st.success("No unanswered questions found.")
+
+        # --- Helper for User Cards (Tasks Dashboard) ---
+        def render_user_card(user_id, user_data, card_type="churn"):
+            card_color = "red" if card_type == "churn" else "green"
+            action_label = "Save User" if card_type == "churn" else "Convert User"
+            
+            with st.expander(f":{card_color}[**{user_id}**] - Risk: {user_data.get('Churn Risk', 0):.1f}%"):
+                # --- Row 1: CRM Info (left) | Persona (right) ---
+                col_crm, col_persona = st.columns(2)
                 
-                # Ensure valid page
-                if curr_page >= total_pages: curr_page = total_pages - 1
-                if curr_page < 0: curr_page = 0
-                st.session_state['tasks_page_number'] = curr_page
+                with col_crm:
+                    st.markdown("##### 📋 CRM Information")
+                    st.markdown(f"**Role:** {user_data.get('role', 'Unknown')}")
+                    st.markdown(f"**Company:** {user_data.get('company', 'Unknown')}")
+                    email = user_data.get('email', '')
+                    if email:
+                        st.markdown(f"**Email:** {email}")
+                    city = user_data.get('city', '')
+                    if city:
+                        st.markdown(f"**City:** {city}")
+                    is_client = user_data.get('is_client', False)
+                    st.markdown(f"**Client:** {'✅ Yes' if is_client else '❌ No'}")
                 
-                start_idx = curr_page * items_per_page
-                end_idx = start_idx + items_per_page
+                with col_persona:
+                    st.markdown("##### 🧠 User Persona")
+                    persona = user_data.get('persona', 'Unknown')
+                    st.markdown(f"**Behavioral Persona:** {persona}")
+                    mood_score = user_data.get('mood_score', 0)
+                    mood_emoji = user_data.get('mood_emoji', '😐')
+                    st.markdown(f"**Avg Sentiment:** {mood_emoji} {mood_score:.1f} / 5.0")
+                    sentiment_trend = user_data.get('sentiment_trend', 0)
+                    trend_arrow = "📈" if sentiment_trend > 0 else "📉" if sentiment_trend < 0 else "➡️"
+                    st.markdown(f"**Sentiment Trend:** {trend_arrow} {sentiment_trend:.2f}")
+                    if 'churn_category' in user_data:
+                        st.markdown(f"**Churn Category:** {user_data['churn_category']}")
                 
-                # Display Controls Top (optional, or just bottom)
-                st.caption(f"Showing page {curr_page + 1} of {total_pages} ({len(visible_tasks)} tasks total)")
-                
-                current_page_tasks = visible_tasks[start_idx:end_idx]
-                
-                for index in current_page_tasks:
-                    row = df.loc[index] # Access by label (original index)
-                    render_task_card(index, row)
-                
-                # --- Pagination Controls Bottom ---
+                # --- Action Button ---
                 st.markdown("---")
-                col_prev, col_page, col_next = st.columns([1, 2, 1])
+                if st.button(action_label, key=f"act_{card_type}_{user_id}"):
+                    st.balloons()
+                    st.toast(f"Action taken for {user_id}!")
+                        
+                # --- User Activity Timeline (Visual) ---
+                st.markdown("---")
+                st.caption("Recent Activity Timeline")
                 
-                with col_prev:
-                    if st.button("Previous Page", disabled=(curr_page == 0)):
-                        st.session_state['tasks_page_number'] -= 1
-                        st.rerun()
-                        
-                with col_page:
-                    st.markdown(f"**Page {curr_page + 1} / {total_pages}**", unsafe_allow_html=True)
+                # Get user messages
+                # Note: df is global here.
+                user_msgs = df[df['user'] == user_id].sort_values('ts')
+                
+                if not user_msgs.empty:
+                    # Prepare items
+                    # We want RECENT activity? Or all? 
+                    # User said "user activity timeline". Usually means history.
+                    # But inside a card, minimal is better.
+                    # Let's take last 20 events to avoid data overload in the UI
+                    recent_msgs = user_msgs.tail(20)
+                    items = get_timeline_items(recent_msgs)
                     
-                with col_next:
-                    if st.button("Next Page", disabled=(curr_page >= total_pages - 1)):
-                        st.session_state['tasks_page_number'] += 1
-                        st.rerun()
-                        
-        else:
-            st.success("No unanswered questions found in selected channels!")
+                    # Render Widget
+                    # Unique key is needed!
+                    render_timeline_widget(items, height="200px", key_prefix=f"tl_{user_id}")
+                else:
+                    st.caption("No recent activity found.")
+
+        # --- Section 2: Top 20 High Churn Risk ---
+        with tab2:
+            st.subheader("Top 20 At Risk (High Churn)")
+            if not enriched_users_df.empty and 'Churn Risk' in enriched_users_df.columns:
+                # Filter High Risk (> 50) AND Exclude 100% (per user request)
+                # Sort Descending
+                high_risk_df = enriched_users_df[
+                    (enriched_users_df['Churn Risk'] > 50) & 
+                    (enriched_users_df['Churn Risk'] < 100)
+                ].sort_values("Churn Risk", ascending=False).head(20)
+                
+                if not high_risk_df.empty:
+                    for user_id, user_row in high_risk_df.iterrows():
+                         render_user_card(user_id, user_row, "churn")
+                else:
+                    st.info("No high-risk users found (excluding 100%).")
+            else:
+                st.info("No churn data available.")
+
+        # --- Section 3: Top 20 Conversion Opportunities ---
+        with tab3:
+            st.subheader("Top 20 Conversion Opportunities")
+            if not enriched_users_df.empty and 'Churn Risk' in enriched_users_df.columns:
+                # Low Churn Risk (< 50) AND Exclude 0% (per user request)
+                # Sort Ascending (Lowest Risk = Best Opportunity)
+                opp_df = enriched_users_df[
+                    (enriched_users_df['Churn Risk'] < 50) & 
+                    (enriched_users_df['Churn Risk'] > 0)
+                ].sort_values("Churn Risk", ascending=True).head(20)
+                
+                if not opp_df.empty:
+                    for user_id, user_row in opp_df.iterrows():
+                        render_user_card(user_id, user_row, "convert")
+                else:
+                    st.info("No conversion opportunities found (excluding 0%).")
+            else:
+                st.info("No conversion data available.")
 
     # --- Dashboard 4: Bulk Messaging ---
     elif dashboard_mode == "Bulk Messaging":

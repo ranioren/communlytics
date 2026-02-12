@@ -31,11 +31,14 @@ def upload_to_postgres():
             print("Ensuring vector extension...")
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
             
-            # 3. Create Table (if not exists)
+            # 3. Create Table (with DROP to ensure schema update)
             # Embedding-001 has 768 dimensions
-            print("Creating table 'knowledge_base' if needed...")
+            print("Dropping old table if exists...")
+            conn.execute(text("DROP TABLE IF EXISTS knowledge_base;"))
+
+            print("Creating table 'knowledge_base'...")
             conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS knowledge_base (
+                CREATE TABLE knowledge_base (
                     id SERIAL PRIMARY KEY,
                     question TEXT,
                     answer TEXT,
@@ -43,9 +46,10 @@ def upload_to_postgres():
                 );
             """))
             
-            # 4. Truncate Table (Clear old data)
-            print("Clearing old data...")
-            conn.execute(text("TRUNCATE TABLE knowledge_base;"))
+            # 4. Truncate Table (Clear old data) - Not needed if we dropped, but keeping logic flow
+            # print("Clearing old data...")
+            # conn.execute(text("TRUNCATE TABLE knowledge_base;"))
+
             conn.commit()
             
             # 5. Insert Data

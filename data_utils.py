@@ -29,15 +29,19 @@ def load_data(path, last_modified=None):
     Falls back to CSV if DB connection fails.
     """
     try:
+        print("DEBUG: Connecting to DB...")
         engine = get_db_engine()
         query = "SELECT * FROM messages"
+        print("DEBUG: Querying DB...")
         df = pd.read_sql(query, engine)
+        print(f"DEBUG: DB Query returned {len(df)} rows.")
         
         if df.empty:
             print("DB empty, falling back to CSV...")
             raise Exception("Empty DB")
             
         # Post-processing to match App expectations
+        print("DEBUG: Post-processing DB data...")
         # Rename persisted columns to App's display names
         df = df.rename(columns={
             "sentiment_score": "Sentiment Score",
@@ -60,16 +64,116 @@ def load_data(path, last_modified=None):
         # Sort
         df = df.sort_values(by=['channel', 'ts'])
 
-        # --- RESTORED LOGIC FOR UNANSWERED QUESTIONS ---
-        # OPTIMIZATION: Logic moved to DB. We trust the DB column 'is_unanswered' is now accurate.
-        # This removes the O(N^2) loop that was slowing down startup.
+        # --- OPTIMIZATION: Pre-calculate Timeline Attributes ---
+        # Vectorized logic for timeline colors and content
+        print("DEBUG: Pre-calculating timeline attributes...")
         
+        # Conditions
+        cond_question = df['is_question'] == True
+        cond_neg = df['Sentiment Score'] <= 2
+        cond_pos = df['Sentiment Score'] >= 4
+        
+        # Colors (Background, Text, Border)
+        # Gold/Yellow for Question
+        color_q = "background-color: #FFD700; color: black; border-color: #DAA520;" 
+        # Red for Negative
+        color_n = "background-color: #FF4B4B; color: white; border-color: #8B0000;"
+        # Green for Positive
+        color_p = "background-color: #28a745; color: white; border-color: #006400;"
+        # Gray for Neutral (Default)
+        color_def = ""
+        
+        # Apply Colors
+        conditions = [cond_question, cond_neg, cond_pos]
+        choices_color = [color_q, color_n, color_p]
+        df['timeline_style'] = np.select(conditions, choices_color, default=color_def)
+        
+        # Apply Content (Emoji + Channel)
+        # We need to vectorized string concatenation
+        # np.select can return specific prefixes
+        prefix_q = "❓ "
+        prefix_n = "😠 "
+        prefix_p = "😃 "
+        prefix_def = ""
+        
+        choices_prefix = [prefix_q, prefix_n, prefix_p]
+        df['timeline_prefix'] = np.select(conditions, choices_prefix, default=prefix_def)
+        df['timeline_content'] = df['timeline_prefix'] + df['channel'].astype(str)
+        # Drop temp prefix
+        df = df.drop(columns=['timeline_prefix'])
+
+        # --- RESTORED & OPTIMIZED LOGIC FOR UNANSWERED QUESTIONS (36h Window) ---
+        print("DEBUG: Calculating unanswered questions (36h window, strict mode)...")
+        # Ensure is_question is set
+        df['is_question'] = df['sentences'].astype(str).str.contains(r'\?', regex=True)
+        
+        df['is_unanswered'] = False
+        
+        # Helper: Vectorized per channel
+        # Reset index to allow merging back
+        df = df.reset_index(drop=True)
+        
+        msgs_by_channel = df.groupby('channel')
+        unanswered_indices = []
+        
+        for name, group in msgs_by_channel:
+            if name == 'reddit': continue # Skip reddit
+            
+            # STRICT LOGIC (User Request):
+            # An answer MUST be a message containing '@' (mention).
+            # It must be within 36 hours.
+            
+            # Get arrays
+            # We need Question timestamps
+            is_q_array = group['is_question'].values
+            q_indices_local = np.where(is_q_array)[0]
+            if len(q_indices_local) == 0: continue
+            
+            ts_array = group['ts'].values
+            q_ts = ts_array[q_indices_local]
+
+            # We need Answer timestamps (messages with '@')
+            # Check for mentions
+            has_mention = group['sentences'].str.contains('@', na=False).values
+            
+            # Timestamps of valid answers
+            answer_ts = ts_array[has_mention]
+            
+            if len(answer_ts) == 0:
+                # ALL questions in this channel are unanswered
+                real_indices = group.index[q_indices_local]
+                unanswered_indices.extend(real_indices)
+                continue
+
+            # For each question, find if there is an answer in [q_ts, q_ts + 36h]
+            # using searchsorted on `answer_ts` array.
+            
+            window_end = q_ts + np.timedelta64(36, 'h')
+            
+            # Find insertion points in the ANSWER array
+            idx_start = np.searchsorted(answer_ts, q_ts, side='right')
+            idx_end = np.searchsorted(answer_ts, window_end, side='right')
+            
+            # If count > 0, then answered.
+            no_reply_mask = (idx_end - idx_start) == 0
+            
+            # Get original indices of these unanswered questions
+            real_indices = group.index[q_indices_local[no_reply_mask]]
+            unanswered_indices.extend(real_indices)
+            
+        # Set True
+        if unanswered_indices:
+            df.loc[unanswered_indices, 'is_unanswered'] = True
+            
+        print(f"DEBUG: Found {len(unanswered_indices)} unanswered questions.")
+        print("DEBUG: DB Load Complete.")
         return df
         
     except Exception as e:
         print(f"DB Load Failed: {e}. Loading from CSV at {path}")
         # Fallback to original CSV logic
     
+    print(f"DEBUG: Checking CSV path: {path}")
     if not os.path.exists(path):
         st.error(f"Data file not found at: {path}")
         return pd.DataFrame()
@@ -632,7 +736,11 @@ def load_users_from_db():
                 'total_messages': 'Total_Messages',
                 'last_active': 'Last_Active',
                 'mood_emoji': 'Mood_Emoji',
-                'mood_score': 'Mood_Score'
+                'mood_score': 'Mood_Score',
+                'churn_risk_score': 'Churn Risk',
+                'churn_category': 'Churn Category',
+                'days_since_last_post': 'Days Inactive',
+                'reply_ratio': 'Reply Ratio'
             }
             df = df.rename(columns=rename_map)
             return df
