@@ -4,7 +4,7 @@ plotly
 textblob
 python-dotenv
 requests
-google-generativeai
+google-genai
 wordcloud
 matplotlib
 transformers
@@ -15,5 +15,4 @@ nest_asyncio
 psycopg2-binary
 sqlalchemy
 pgvector
-streamlit-vis-timeline
 streamlit-vis-timeline

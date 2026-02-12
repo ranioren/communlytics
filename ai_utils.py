@@ -1,4 +1,4 @@
-import google.generativeai as genai
+from google import genai
 import pandas as pd
 import numpy as np
 import pickle
@@ -10,9 +10,9 @@ import streamlit as st
 
 load_dotenv()
 
-# Configure Gemini
+# Configure Gemini - new SDK uses Client object
 api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-genai.configure(api_key=api_key)
+client = genai.Client(api_key=api_key)
 
 from sqlalchemy import create_engine, text
 
@@ -21,17 +21,18 @@ DB_URI = os.getenv("DB_URI")
 
 KB_PATH = os.path.join("channel extraction", "knowledge_base.pkl")
 
-def get_embedding(text):
+def get_embedding(text_input):
     """Fetches embedding for a single string using Gemini."""
     try:
-        # Add rate limit handling if needed, but basic call:
-        result = genai.embed_content(
-            model="models/gemini-embedding-001",
-            content=text,
-            task_type="retrieval_query",
-            output_dimensionality=768
+        result = client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=text_input,
+            config={
+                "task_type": "RETRIEVAL_QUERY",
+                "output_dimensionality": 768
+            }
         )
-        return np.array(result['embedding'])
+        return np.array(result.embeddings[0].values)
     except Exception as e:
         print(f"Error fetching embedding: {e}")
         return None
@@ -43,15 +44,12 @@ def get_top_suggestions(query, top_k=3):
         return []
     
     # Format for PGVector
-    # Numpy array to list of floats (crucial for json/string serialization)
     emb_list = [float(x) for x in query_emb]
     emb_str = str(emb_list)
     
     try:
         engine = create_engine(DB_URI)
         with engine.connect() as conn:
-            # Use Cosine Distance operator <=>
-            # Similarity = 1 - Distance
             sql = text("""
                 SELECT question, answer, 1 - (embedding <=> :emb) as similarity
                 FROM knowledge_base
@@ -72,13 +70,10 @@ def get_top_suggestions(query, top_k=3):
         
     except Exception as e:
         st.error(f"Vector search failed: {e}")
-        # Optional: Fallback to pickle if needed, but we wanted to migrate away.
         return []
 
 def generate_ai_response(question, contexts, existing_draft=""):
     """Generates a response using Gemini based on provided contexts and existing draft."""
-    model = genai.GenerativeModel('gemini-flash-latest')
-    
     context_str = "\n\n".join([f"Relevant Response {i+1}:\nQ: {c['question']}\nA: {c['answer']}" for i, c in enumerate(contexts)])
     
     prompt = f"""
@@ -108,7 +103,10 @@ Final Response:
 """
     
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=prompt
+        )
         return response.text
     except Exception as e:
         return f"Error generating response: {e}"
@@ -122,8 +120,6 @@ if __name__ == "__main__":
 
 def generate_community_health_suggestion(status_summary):
     """Generates recommendations for a community manager based on health metrics."""
-    model = genai.GenerativeModel('gemini-flash-latest')
-    
     prompt = f"""
 You are an expert Community Manager consultant.
 Review the following community status summary:
@@ -137,7 +133,10 @@ Task:
     """
     
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=prompt
+        )
         return response.text
     except Exception as e:
         return f"Error generating suggestion: {e}"
@@ -147,8 +146,6 @@ def generate_crm_response(user_query, context_str):
     Generates a response to a user's question about a specific CRM contact,
     based strictly on the provided context string.
     """
-    model = genai.GenerativeModel('gemini-flash-latest')
-    
     prompt = f"""
 You are a helpful CRM assistant. You have access to the following details about a user:
 
@@ -162,7 +159,10 @@ Task:
 3. Be concise and friendly.
 """
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=prompt
+        )
         return response.text
     except Exception as e:
         return f"Error: {e}"
@@ -208,34 +208,26 @@ def build_knowledge_base(input_csv_path=None, output_pkl_path=None):
     
     print(f"Starting batch processing. Batch size: {batch_size}. Item count: {total_items}")
     
-    # We will iterate by batch
-    # We need to handle 'start_idx' correctly. 
-    # If start_idx is 103, we should start at 100 or just slice from 103?
-    # Simpler to slice the dataframe from start_idx
-    
     df_to_process = df.iloc[start_idx:]
     
-    # Create batches
-    # We'll use a generator or just loop with step
-    
     for i in tqdm(range(0, len(df_to_process), batch_size)):
-        # Calculate actual indices in the original dataframe
         current_batch_df = df_to_process.iloc[i : i + batch_size]
         batch_texts = current_batch_df['text_for_embedding'].tolist()
         
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # Gemini embed_content supports list of strings
-                result = genai.embed_content(
-                    model="models/gemini-embedding-001",
-                    content=batch_texts,
-                    task_type="retrieval_document",
-                    output_dimensionality=768
+                result = client.models.embed_content(
+                    model="gemini-embedding-001",
+                    contents=batch_texts,
+                    config={
+                        "task_type": "RETRIEVAL_DOCUMENT",
+                        "output_dimensionality": 768
+                    }
                 )
                 
-                # Result['embedding'] should be a list of lists
-                batch_embeddings = result['embedding']
+                # New SDK returns result.embeddings (list of Embedding objects)
+                batch_embeddings = [emb.values for emb in result.embeddings]
                 
                 if len(batch_embeddings) != len(batch_texts):
                     raise Exception(f"Mismatch in returned embeddings count. Sent {len(batch_texts)}, got {len(batch_embeddings)}")
@@ -243,8 +235,6 @@ def build_knowledge_base(input_csv_path=None, output_pkl_path=None):
                 embeddings.extend(batch_embeddings)
                 
                 # Rate limit safety
-                # 1 request per 4.5s is safe for 15 RPM. 
-                # Since we are doing batch, it is effective 1 request.
                 time.sleep(4.5) 
                 
                 # Checkpoint: Save every batch
