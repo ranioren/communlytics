@@ -75,7 +75,7 @@ def get_timeline_items(user_df):
 
 def render_timeline_widget(items, height="400px", key_prefix="timeline"):
     """
-    Renders the Vis.js timeline using streamlit-vis-timeline.
+    Renders the Vis.js timeline using streamlit_timeline (from streamlit-vis-timeline package).
     """
     try:
         from streamlit_timeline import st_timeline
