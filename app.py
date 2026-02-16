@@ -75,7 +75,7 @@ def get_timeline_items(user_df):
 
 def render_timeline_widget(items, height="400px", key_prefix="timeline"):
     """
-    Renders the Vis.js timeline using streamlit_timeline.
+    Renders the Vis.js timeline using streamlit-vis-timeline.
     """
     try:
         from streamlit_timeline import st_timeline
@@ -92,7 +92,7 @@ def render_timeline_widget(items, height="400px", key_prefix="timeline"):
         # We must output to a key to avoid collision if multiple timelines exist
         return st_timeline(items, options=timeline_options, height=height, key=f"{key_prefix}_{hash(str(items)[:100])}")
     except ImportError:
-        st.error("Timeline component not installed. PLease install streamlit-timeline.")
+        st.error("Timeline component not installed. Please install streamlit-vis-timeline.")
         return None
     except Exception as e:
         st.error(f"Timeline error: {e}")
