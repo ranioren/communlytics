@@ -27,6 +27,7 @@ from ai_utils import get_top_suggestions, generate_ai_response, generate_crm_res
 from trello_utils import add_trello_task
 from slack_utils import send_private_reply, send_channel_reply
 from streamlit_option_menu import option_menu
+from streamlit_timeline import st_timeline
 # import hubspot_utils (Removed)
 from data_utils import load_crm_data
 
@@ -78,8 +79,6 @@ def render_timeline_widget(items, height="400px", key_prefix="timeline"):
     Renders the Vis.js timeline using streamlit_timeline (from streamlit-vis-timeline package).
     """
     try:
-        from streamlit_timeline import st_timeline
-        
         timeline_options = {
             "height": height,
             "showMajorLabels": True, 
@@ -91,9 +90,6 @@ def render_timeline_widget(items, height="400px", key_prefix="timeline"):
         
         # We must output to a key to avoid collision if multiple timelines exist
         return st_timeline(items, options=timeline_options, height=height, key=f"{key_prefix}_{hash(str(items)[:100])}")
-    except ImportError:
-        st.error("Timeline component not installed. Please install streamlit-vis-timeline.")
-        return None
     except Exception as e:
         st.error(f"Timeline error: {e}")
         return None
@@ -870,8 +866,6 @@ def main():
                         # st.write(f"Debug Selection: {selected_item}") 
                         pass
                         
-            except ImportError:
-                 st.error("Please install 'streamlit-vis-timeline' (which provides streamlit_timeline) to view this chart.")
             except Exception as e:
                  st.error(f"Error loading timeline: {e}")
                 
