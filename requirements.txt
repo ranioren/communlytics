@@ -1,5 +1,6 @@
 # setuptools must be installed first to provide pkg_resources for streamlit-vis-timeline
 # Note: pkg_resources was removed in setuptools 82.0.0, so we must use <82
+# Using >=78.1.1 for security patches (path traversal and command injection vulnerabilities)
 setuptools>=78.1.1,<82
 streamlit
 pandas
