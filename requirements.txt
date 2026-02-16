@@ -16,3 +16,4 @@ psycopg2-binary
 sqlalchemy
 pgvector
 streamlit-vis-timeline
+setuptools>=78.1.1
