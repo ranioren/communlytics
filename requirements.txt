@@ -1,6 +1,6 @@
 # setuptools must be installed first to provide pkg_resources for streamlit-vis-timeline
 # Note: pkg_resources has issues in newer setuptools versions, pinning to <70.0.0 for compatibility
-setuptools<70.0.0
+setuptools>=65.0.0,<70.0.0
 streamlit
 pandas
 plotly
